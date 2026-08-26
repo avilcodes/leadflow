@@ -293,6 +293,31 @@ export async function getActivities(params?: {
   return fetchApi(`/api/activities?${searchParams.toString()}`);
 }
 
+// ─── Auto Processing ───
+
+export async function getAutoProcessingSettings() {
+  return fetchApi<{ enabled: boolean; updatedAt: string | null; updatedBy: string | null }>(
+    '/api/settings/auto-processing'
+  );
+}
+
+export async function updateAutoProcessingSettings(enabled: boolean) {
+  return fetchApi('/api/settings/auto-processing', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function processLeads(leadIds?: string[]) {
+  return fetchApi<{ processedCount: number; failedCount: number; totalLeads: number; message: string }>(
+    '/api/leads/process',
+    {
+      method: 'POST',
+      body: JSON.stringify({ leadIds }),
+    }
+  );
+}
+
 // ─── Settings / Credentials ───
 
 export async function getCredentials() {

@@ -134,6 +134,35 @@ export async function POST(request: NextRequest) {
       metadata: { source: lead.source },
     });
 
+    // Check auto-processing setting and trigger if enabled
+    try {
+      const settingsDoc = await db.firestore
+        .collection('settings')
+        .doc('auto-processing')
+        .get();
+      if (settingsDoc.exists && settingsDoc.data()?.enabled) {
+        // Auto-process: create enrichment job
+        await db.leads.update(lead.id, { enrichmentStatus: 'pending' });
+        await db.enrichmentJobs.create({
+          leadId: lead.id,
+          type: 'linkedin_scrape',
+          provider: 'auto-process',
+          status: 'pending',
+          priority: 5,
+        });
+        await createActivity({
+          eventType: 'lead.enrichment.started',
+          leadId: lead.id,
+          userId: session.userId,
+          metadata: { source: 'auto-processing', trigger: 'lead-create' },
+        });
+        logger.info('Auto-processing triggered for new lead', { leadId: lead.id });
+      }
+    } catch (autoErr) {
+      // Don't fail lead creation if auto-processing check fails
+      logger.error('Auto-processing check failed', { error: autoErr });
+    }
+
     // Load full lead with tags
     const tagDocs = await db.leadTags.findMany({ where: { leadId: lead.id } });
     const leadTags = await Promise.all(

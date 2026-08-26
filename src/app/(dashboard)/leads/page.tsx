@@ -12,16 +12,26 @@ import {
   Brain,
   Mail,
   Trash2,
-  Tag,
   Users,
   X,
   FileSpreadsheet,
+  Zap,
+  Loader2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { DataTable, Column } from '@/components/data-table';
 import { StatusBadge } from '@/components/badge';
 import { Modal } from '@/components/modal';
-import { getLeads, createLead, bulkAction, importLeads, exportLeads } from '@/lib/api';
+import {
+  getLeads,
+  createLead,
+  bulkAction,
+  importLeads,
+  exportLeads,
+  getAutoProcessingSettings,
+  updateAutoProcessingSettings,
+  processLeads,
+} from '@/lib/api';
 
 interface Lead {
   id: string;
@@ -58,6 +68,7 @@ export default function LeadsPage() {
   // Modals
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showAutoProcessConfirm, setShowAutoProcessConfirm] = useState(false);
 
   // Create lead form
   const [createForm, setCreateForm] = useState({
@@ -128,6 +139,54 @@ export default function LeadsPage() {
       toast.error(err.message || 'Bulk action failed');
     },
   });
+
+  // Auto-processing
+  const { data: autoProcessData } = useQuery({
+    queryKey: ['auto-processing'],
+    queryFn: async () => {
+      const res = await getAutoProcessingSettings();
+      return res.data as { enabled: boolean; updatedAt: string | null };
+    },
+  });
+
+  const autoProcessEnabled = autoProcessData?.enabled ?? false;
+
+  const toggleAutoProcessMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await updateAutoProcessingSettings(enabled);
+      if (enabled) {
+        // When turning ON, process all unprocessed leads
+        await processLeads();
+      }
+    },
+    onSuccess: (_, enabled) => {
+      if (enabled) {
+        toast.success('Auto-processing enabled. Unprocessed leads queued for processing.');
+      } else {
+        toast.success('Auto-processing disabled.');
+      }
+      queryClient.invalidateQueries({ queryKey: ['auto-processing'] });
+      queryClient.invalidateQueries({ queryKey: ['leads'] });
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || 'Failed to update auto-processing');
+    },
+  });
+
+  const handleAutoProcessToggle = () => {
+    if (!autoProcessEnabled) {
+      // Turning ON — show confirmation
+      setShowAutoProcessConfirm(true);
+    } else {
+      // Turning OFF — just do it
+      toggleAutoProcessMutation.mutate(false);
+    }
+  };
+
+  const confirmAutoProcess = () => {
+    setShowAutoProcessConfirm(false);
+    toggleAutoProcessMutation.mutate(true);
+  };
 
   const handleSort = useCallback((key: string, order: 'asc' | 'desc') => {
     setSortBy(key);
@@ -269,6 +328,44 @@ export default function LeadsPage() {
             Add Lead
           </button>
         </div>
+      </div>
+
+      {/* Auto-Processing Toggle */}
+      <div className="card p-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center justify-center w-10 h-10 rounded-lg ${autoProcessEnabled ? 'bg-primary-500/15' : 'bg-surface-800'}`}>
+            <Zap className={`w-5 h-5 ${autoProcessEnabled ? 'text-primary-400' : 'text-surface-500'}`} />
+          </div>
+          <div>
+            <p className="text-sm font-medium text-white">Auto Processing</p>
+            <p className="text-xs text-surface-500">
+              {autoProcessEnabled
+                ? 'New leads are automatically enriched, analyzed, and emailed'
+                : 'Leads must be manually sent for processing'}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={handleAutoProcessToggle}
+          disabled={toggleAutoProcessMutation.isPending}
+          className="relative inline-flex h-7 w-12 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-surface-900"
+          style={{ backgroundColor: autoProcessEnabled ? 'var(--color-primary-500)' : 'var(--color-surface-600, #4b5563)' }}
+          role="switch"
+          aria-checked={autoProcessEnabled}
+          aria-label="Toggle auto processing"
+        >
+          {toggleAutoProcessMutation.isPending ? (
+            <span className="flex items-center justify-center w-full h-full">
+              <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
+            </span>
+          ) : (
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out mt-[1px] ${
+                autoProcessEnabled ? 'translate-x-5' : 'translate-x-0.5'
+              }`}
+            />
+          )}
+        </button>
       </div>
 
       {/* Filters */}
@@ -555,6 +652,62 @@ export default function LeadsPage() {
             className="hidden"
             onChange={(e) => setImportFile(e.target.files?.[0] || null)}
           />
+        </div>
+      </Modal>
+
+      {/* Auto-Processing Confirmation Modal */}
+      <Modal
+        open={showAutoProcessConfirm}
+        onClose={() => setShowAutoProcessConfirm(false)}
+        title="Enable Auto Processing"
+        description="Are you sure you want to enable auto processing?"
+        footer={
+          <>
+            <button onClick={() => setShowAutoProcessConfirm(false)} className="btn-secondary">
+              Cancel
+            </button>
+            <button
+              onClick={confirmAutoProcess}
+              disabled={toggleAutoProcessMutation.isPending}
+              className="btn-primary"
+            >
+              <Zap className="w-4 h-4" />
+              {toggleAutoProcessMutation.isPending ? 'Processing...' : 'Enable & Process All'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex items-start gap-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
+            <Zap className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm text-amber-200 font-medium">
+                All unprocessed leads will be sent for processing
+              </p>
+              <p className="text-xs text-amber-300/70 mt-1">
+                This will trigger LinkedIn profile summarizing and email generation
+                for every lead that hasn&apos;t been processed yet. New leads added
+                in the future will also be automatically processed.
+              </p>
+            </div>
+          </div>
+          <div className="text-sm text-surface-400">
+            <p>When auto processing is enabled:</p>
+            <ul className="mt-2 space-y-1.5 ml-4">
+              <li className="flex items-start gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-primary-400 mt-0.5 flex-shrink-0" />
+                <span>Leads are automatically enriched (LinkedIn scraping)</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Brain className="w-3.5 h-3.5 text-purple-400 mt-0.5 flex-shrink-0" />
+                <span>AI analysis runs on enriched data</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <Mail className="w-3.5 h-3.5 text-blue-400 mt-0.5 flex-shrink-0" />
+                <span>Personalized emails are generated and queued</span>
+              </li>
+            </ul>
+          </div>
         </div>
       </Modal>
     </div>
