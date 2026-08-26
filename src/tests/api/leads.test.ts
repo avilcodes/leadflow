@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mockPrismaClient } from '../setup';
+import { mockDb } from '../setup';
 import { createLeadSchema, leadFiltersSchema } from '@/lib/validation';
 
 describe('Lead API Logic', () => {
@@ -54,18 +54,14 @@ describe('Lead API Logic', () => {
         updatedAt: new Date(),
       };
 
-      mockPrismaClient.lead.create.mockResolvedValue(createdLead);
+      mockDb.leads.create.mockResolvedValue(createdLead);
 
-      const result = await mockPrismaClient.lead.create({
-        data: leadData,
-      });
+      const result = await mockDb.leads.create(leadData);
 
       expect(result.id).toBe('lead-new-1');
       expect(result.firstName).toBe('Jane');
       expect(result.email).toBe('jane@widgets.io');
-      expect(mockPrismaClient.lead.create).toHaveBeenCalledWith({
-        data: leadData,
-      });
+      expect(mockDb.leads.create).toHaveBeenCalledWith(leadData);
     });
   });
 
@@ -85,23 +81,16 @@ describe('Lead API Logic', () => {
 
       const filters = result.data;
 
-      // Build Prisma where clause
+      // Build Firestore where clause
       const where: Record<string, unknown> = { deletedAt: null };
 
-      if (filters.search) {
-        where.OR = [
-          { fullName: { contains: filters.search, mode: 'insensitive' } },
-          { email: { contains: filters.search, mode: 'insensitive' } },
-          { companyName: { contains: filters.search, mode: 'insensitive' } },
-        ];
-      }
       if (filters.status) where.status = filters.status;
       if (filters.source) where.source = filters.source;
 
       expect(where.status).toBe('qualified');
       expect(where.source).toBe('apollo');
-      expect(where.OR).toHaveLength(3);
       expect(where.deletedAt).toBeNull();
+      // Note: text search in Firestore is handled in-memory via searchLeads()
     });
 
     it('applies pagination defaults', () => {
@@ -131,18 +120,16 @@ describe('Lead API Logic', () => {
         },
       ];
 
-      mockPrismaClient.lead.findMany.mockResolvedValue(mockLeads);
-      mockPrismaClient.lead.count.mockResolvedValue(50);
+      mockDb.leads.findMany.mockResolvedValue(mockLeads);
+      mockDb.leads.count.mockResolvedValue(50);
 
-      const leads = await mockPrismaClient.lead.findMany({
+      const leads = await mockDb.leads.findMany({
         where: { deletedAt: null },
-        take: 25,
-        skip: 0,
-        orderBy: { createdAt: 'desc' },
+        limit: 25,
+        offset: 0,
+        orderBy: { field: 'createdAt', direction: 'desc' },
       });
-      const total = await mockPrismaClient.lead.count({
-        where: { deletedAt: null },
-      });
+      const total = await mockDb.leads.count({ deletedAt: null });
 
       expect(leads).toHaveLength(2);
       expect(total).toBe(50);
@@ -159,28 +146,22 @@ describe('Lead API Logic', () => {
         updatedAt: now,
       };
 
-      mockPrismaClient.lead.update.mockResolvedValue(deletedLead);
+      mockDb.leads.update.mockResolvedValue(deletedLead);
 
-      const result = await mockPrismaClient.lead.update({
-        where: { id: 'lead-1' },
-        data: { deletedAt: now },
-      });
+      const result = await mockDb.leads.update('lead-1', { deletedAt: now });
 
       expect(result.deletedAt).toEqual(now);
-      expect(mockPrismaClient.lead.update).toHaveBeenCalledWith({
-        where: { id: 'lead-1' },
-        data: { deletedAt: now },
-      });
+      expect(mockDb.leads.update).toHaveBeenCalledWith('lead-1', { deletedAt: now });
     });
 
     it('excludes soft-deleted leads from queries', async () => {
-      mockPrismaClient.lead.findMany.mockResolvedValue([]);
+      mockDb.leads.findMany.mockResolvedValue([]);
 
-      await mockPrismaClient.lead.findMany({
+      await mockDb.leads.findMany({
         where: { deletedAt: null },
       });
 
-      expect(mockPrismaClient.lead.findMany).toHaveBeenCalledWith({
+      expect(mockDb.leads.findMany).toHaveBeenCalledWith({
         where: { deletedAt: null },
       });
     });
@@ -192,12 +173,9 @@ describe('Lead API Logic', () => {
         deletedAt: null,
       };
 
-      mockPrismaClient.lead.update.mockResolvedValue(restoredLead);
+      mockDb.leads.update.mockResolvedValue(restoredLead);
 
-      const result = await mockPrismaClient.lead.update({
-        where: { id: 'lead-1' },
-        data: { deletedAt: null },
-      });
+      const result = await mockDb.leads.update('lead-1', { deletedAt: null });
 
       expect(result.deletedAt).toBeNull();
     });
@@ -211,13 +189,11 @@ describe('Lead API Logic', () => {
         fullName: 'John Doe',
       };
 
-      mockPrismaClient.lead.findFirst.mockResolvedValue(existingLead);
+      mockDb.leads.findFirst.mockResolvedValue(existingLead);
 
-      const found = await mockPrismaClient.lead.findFirst({
-        where: {
-          email: 'john@acme.com',
-          deletedAt: null,
-        },
+      const found = await mockDb.leads.findFirst({
+        email: 'john@acme.com',
+        deletedAt: null,
       });
 
       expect(found).not.toBeNull();
@@ -225,24 +201,25 @@ describe('Lead API Logic', () => {
     });
 
     it('creates new lead when no duplicate found', async () => {
-      mockPrismaClient.lead.findFirst.mockResolvedValue(null);
+      mockDb.leads.findFirst.mockResolvedValue(null);
 
-      const found = await mockPrismaClient.lead.findFirst({
-        where: { email: 'new@example.com', deletedAt: null },
+      const found = await mockDb.leads.findFirst({
+        email: 'new@example.com',
+        deletedAt: null,
       });
 
       expect(found).toBeNull();
 
-      // Would proceed to create
       const newLead = {
         id: 'lead-new',
         email: 'new@example.com',
         fullName: 'New Person',
       };
-      mockPrismaClient.lead.create.mockResolvedValue(newLead);
+      mockDb.leads.create.mockResolvedValue(newLead);
 
-      const created = await mockPrismaClient.lead.create({
-        data: { email: 'new@example.com', fullName: 'New Person' },
+      const created = await mockDb.leads.create({
+        email: 'new@example.com',
+        fullName: 'New Person',
       });
 
       expect(created.id).toBe('lead-new');
@@ -256,22 +233,20 @@ describe('Lead API Logic', () => {
         jobTitle: null,
       };
 
-      mockPrismaClient.lead.findFirst.mockResolvedValue(existingLead);
-      mockPrismaClient.lead.update.mockResolvedValue({
+      mockDb.leads.findFirst.mockResolvedValue(existingLead);
+      mockDb.leads.update.mockResolvedValue({
         ...existingLead,
         jobTitle: 'CTO',
       });
 
-      const found = await mockPrismaClient.lead.findFirst({
-        where: { email: 'john@acme.com', deletedAt: null },
+      const found = await mockDb.leads.findFirst({
+        email: 'john@acme.com',
+        deletedAt: null,
       });
 
       expect(found).not.toBeNull();
 
-      const updated = await mockPrismaClient.lead.update({
-        where: { id: found!.id },
-        data: { jobTitle: 'CTO' },
-      });
+      const updated = await mockDb.leads.update(found!.id, { jobTitle: 'CTO' });
 
       expect(updated.jobTitle).toBe('CTO');
     });
@@ -284,7 +259,6 @@ describe('Lead API Logic', () => {
         total: 10,
       };
 
-      // Simulate a bulk import result
       expect(importResults.created + importResults.updated + importResults.skipped).toBe(
         importResults.total
       );

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mockPrismaClient } from '../setup';
+import { mockDb } from '../setup';
 import { createCampaignSchema } from '@/lib/validation';
 
 describe('Campaign API Logic', () => {
@@ -57,11 +57,9 @@ describe('Campaign API Logic', () => {
         updatedAt: new Date(),
       };
 
-      mockPrismaClient.campaign.create.mockResolvedValue(createdCampaign);
+      mockDb.campaigns.create.mockResolvedValue(createdCampaign);
 
-      const result = await mockPrismaClient.campaign.create({
-        data: campaignData,
-      });
+      const result = await mockDb.campaigns.create(campaignData);
 
       expect(result.id).toBe('campaign-1');
       expect(result.status).toBe('draft');
@@ -154,11 +152,11 @@ describe('Campaign API Logic', () => {
         startedAt: new Date(),
       };
 
-      mockPrismaClient.campaign.update.mockResolvedValue(updatedCampaign);
+      mockDb.campaigns.update.mockResolvedValue(updatedCampaign);
 
-      const result = await mockPrismaClient.campaign.update({
-        where: { id: 'campaign-1' },
-        data: { status: 'running', startedAt: new Date() },
+      const result = await mockDb.campaigns.update('campaign-1', {
+        status: 'running',
+        startedAt: new Date(),
       });
 
       expect(result.status).toBe('running');
@@ -174,11 +172,11 @@ describe('Campaign API Logic', () => {
         completedAt: now,
       };
 
-      mockPrismaClient.campaign.update.mockResolvedValue(completedCampaign);
+      mockDb.campaigns.update.mockResolvedValue(completedCampaign);
 
-      const result = await mockPrismaClient.campaign.update({
-        where: { id: 'campaign-1' },
-        data: { status: 'completed', completedAt: now },
+      const result = await mockDb.campaigns.update('campaign-1', {
+        status: 'completed',
+        completedAt: now,
       });
 
       expect(result.status).toBe('completed');
@@ -194,11 +192,11 @@ describe('Campaign API Logic', () => {
         pausedAt: now,
       };
 
-      mockPrismaClient.campaign.update.mockResolvedValue(pausedCampaign);
+      mockDb.campaigns.update.mockResolvedValue(pausedCampaign);
 
-      const result = await mockPrismaClient.campaign.update({
-        where: { id: 'campaign-1' },
-        data: { status: 'paused', pausedAt: now },
+      const result = await mockDb.campaigns.update('campaign-1', {
+        status: 'paused',
+        pausedAt: now,
       });
 
       expect(result.status).toBe('paused');
@@ -217,13 +215,11 @@ describe('Campaign API Logic', () => {
         addedAt: new Date(),
       };
 
-      mockPrismaClient.campaignLead.create.mockResolvedValue(campaignLead);
+      mockDb.campaignLeads.create.mockResolvedValue(campaignLead);
 
-      const result = await mockPrismaClient.campaignLead.create({
-        data: {
-          campaignId: 'campaign-1',
-          leadId: 'lead-1',
-        },
+      const result = await mockDb.campaignLeads.create({
+        campaignId: 'campaign-1',
+        leadId: 'lead-1',
       });
 
       expect(result.campaignId).toBe('campaign-1');
@@ -232,72 +228,46 @@ describe('Campaign API Logic', () => {
     });
 
     it('prevents adding duplicate lead to campaign', async () => {
-      mockPrismaClient.campaignLead.findFirst.mockResolvedValue({
+      mockDb.campaignLeads.findFirst.mockResolvedValue({
         id: 'cl-existing',
         campaignId: 'campaign-1',
         leadId: 'lead-1',
       });
 
-      const existing = await mockPrismaClient.campaignLead.findFirst({
-        where: {
-          campaignId: 'campaign-1',
-          leadId: 'lead-1',
-        },
+      const existing = await mockDb.campaignLeads.findFirst({
+        campaignId: 'campaign-1',
+        leadId: 'lead-1',
       });
 
       expect(existing).not.toBeNull();
-      // In the real API, this would return an error
-    });
-
-    it('adds multiple leads at once', async () => {
-      mockPrismaClient.campaignLead.createMany.mockResolvedValue({ count: 5 });
-
-      const result = await mockPrismaClient.campaignLead.createMany({
-        data: [
-          { campaignId: 'campaign-1', leadId: 'lead-1' },
-          { campaignId: 'campaign-1', leadId: 'lead-2' },
-          { campaignId: 'campaign-1', leadId: 'lead-3' },
-          { campaignId: 'campaign-1', leadId: 'lead-4' },
-          { campaignId: 'campaign-1', leadId: 'lead-5' },
-        ],
-        skipDuplicates: true,
-      });
-
-      expect(result.count).toBe(5);
     });
 
     it('removes a lead from a campaign', async () => {
-      mockPrismaClient.campaignLead.deleteMany.mockResolvedValue({ count: 1 });
+      mockDb.campaignLeads.deleteMany.mockResolvedValue(1);
 
-      const result = await mockPrismaClient.campaignLead.deleteMany({
-        where: {
-          campaignId: 'campaign-1',
-          leadId: 'lead-1',
-        },
+      const result = await mockDb.campaignLeads.deleteMany({
+        campaignId: 'campaign-1',
+        leadId: 'lead-1',
       });
 
-      expect(result.count).toBe(1);
+      expect(result).toBe(1);
     });
 
     it('updates total leads count on campaign', async () => {
-      mockPrismaClient.campaignLead.count.mockResolvedValue(25);
-      mockPrismaClient.campaign.update.mockResolvedValue({
+      mockDb.campaignLeads.count.mockResolvedValue(25);
+      mockDb.campaigns.update.mockResolvedValue({
         id: 'campaign-1',
         totalLeads: 25,
       });
 
-      const count = await mockPrismaClient.campaignLead.count({
-        where: { campaignId: 'campaign-1' },
+      const count = await mockDb.campaignLeads.count({
+        campaignId: 'campaign-1',
       });
 
-      await mockPrismaClient.campaign.update({
-        where: { id: 'campaign-1' },
-        data: { totalLeads: count },
-      });
+      await mockDb.campaigns.update('campaign-1', { totalLeads: count });
 
-      expect(mockPrismaClient.campaign.update).toHaveBeenCalledWith({
-        where: { id: 'campaign-1' },
-        data: { totalLeads: 25 },
+      expect(mockDb.campaigns.update).toHaveBeenCalledWith('campaign-1', {
+        totalLeads: 25,
       });
     });
   });

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getEmailWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { updateEmailSchema } from '@/lib/validation';
@@ -16,13 +16,10 @@ export async function GET(
     }
 
     const { id } = await params;
-    const email = await prisma.emailMessage.findUnique({
-      where: { id },
-      include: {
-        lead: { select: { id: true, fullName: true, email: true, companyName: true, jobTitle: true } },
-        campaign: { select: { id: true, name: true } },
-        emailEvents: { orderBy: { occurredAt: 'desc' } },
-      },
+    const email = await getEmailWithRelations(id, {
+      lead: { select: ['fullName', 'email', 'companyName', 'jobTitle'] },
+      campaign: { select: ['name'] },
+      emailEvents: true,
     });
 
     if (!email) {
@@ -47,12 +44,12 @@ export async function PUT(
     }
 
     const { id } = await params;
-    const existing = await prisma.emailMessage.findUnique({ where: { id } });
+    const existing = await db.emailMessages.findById(id);
     if (!existing) {
       return NextResponse.json({ success: false, error: 'Email not found' }, { status: 404 });
     }
 
-    if (['sent', 'delivered'].includes(existing.status)) {
+    if (['sent', 'delivered'].includes(existing.status as string)) {
       return NextResponse.json({ success: false, error: 'Cannot edit a sent email' }, { status: 400 });
     }
 
@@ -71,18 +68,18 @@ export async function PUT(
     if (parsed.data.status === 'approved') {
       updateData.status = 'approved';
       updateData.approvedAt = new Date();
-      await createActivity({ eventType: 'email.approved', leadId: existing.leadId, emailMessageId: id, userId: session.userId });
+      await createActivity({ eventType: 'email.approved', leadId: existing.leadId as string, emailMessageId: id, userId: session.userId });
     } else if (parsed.data.status === 'rejected') {
       updateData.status = 'rejected';
       updateData.rejectedAt = new Date();
       updateData.rejectionReason = parsed.data.rejectionReason || null;
-      await createActivity({ eventType: 'email.rejected', leadId: existing.leadId, emailMessageId: id, userId: session.userId });
+      await createActivity({ eventType: 'email.rejected', leadId: existing.leadId as string, emailMessageId: id, userId: session.userId });
     } else if (parsed.data.subject || parsed.data.htmlBody || parsed.data.textBody) {
       updateData.status = 'edited';
-      await createActivity({ eventType: 'email.edited', leadId: existing.leadId, emailMessageId: id, userId: session.userId });
+      await createActivity({ eventType: 'email.edited', leadId: existing.leadId as string, emailMessageId: id, userId: session.userId });
     }
 
-    const email = await prisma.emailMessage.update({ where: { id }, data: updateData });
+    const email = await db.emailMessages.update(id, updateData);
 
     return NextResponse.json({ success: true, data: email });
   } catch (error) {

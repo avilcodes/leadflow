@@ -1,4 +1,4 @@
-import prisma from './db';
+import db from './db';
 import logger from './logger';
 import type { LeadData } from '@/types';
 
@@ -32,12 +32,9 @@ export async function findDuplicates(leadData: LeadData): Promise<DuplicateMatch
   try {
     // 1. Match on email (highest confidence)
     if (leadData.email) {
-      const emailMatch = await prisma.lead.findFirst({
-        where: {
-          email: leadData.email.toLowerCase().trim(),
-          deletedAt: null,
-        },
-        select: { id: true, email: true },
+      const emailMatch = await db.leads.findFirst({
+        email: leadData.email.toLowerCase().trim(),
+        deletedAt: null,
       });
 
       if (emailMatch) {
@@ -55,12 +52,9 @@ export async function findDuplicates(leadData: LeadData): Promise<DuplicateMatch
     if (leadData.linkedinUrl) {
       const normalizedUrl = normalizeLinkedInUrl(leadData.linkedinUrl);
       if (normalizedUrl) {
-        const linkedinMatch = await prisma.lead.findFirst({
-          where: {
-            linkedinUrl: normalizedUrl,
-            deletedAt: null,
-          },
-          select: { id: true, linkedinUrl: true },
+        const linkedinMatch = await db.leads.findFirst({
+          linkedinUrl: normalizedUrl,
+          deletedAt: null,
         });
 
         if (linkedinMatch) {
@@ -75,23 +69,28 @@ export async function findDuplicates(leadData: LeadData): Promise<DuplicateMatch
       }
     }
 
-    // 3. Match on fullName + companyName (moderate confidence)
+    // 3. Match on fullName + companyName (moderate confidence, case-insensitive)
     const fullName = leadData.fullName
       || [leadData.firstName, leadData.lastName].filter(Boolean).join(' ');
 
     if (fullName && leadData.companyName) {
-      const nameMatch = await prisma.lead.findFirst({
-        where: {
-          fullName: { equals: fullName, mode: 'insensitive' },
-          companyName: { equals: leadData.companyName, mode: 'insensitive' },
-          deletedAt: null,
-        },
-        select: { id: true, fullName: true, companyName: true },
+      // Firestore doesn't support case-insensitive queries natively,
+      // so fetch by companyName and filter in-memory for case-insensitive match
+      const candidates = await db.leads.findMany({
+        where: { deletedAt: null },
       });
+
+      const nameMatch = candidates.find(
+        (lead: Record<string, unknown>) =>
+          typeof lead.fullName === 'string' &&
+          typeof lead.companyName === 'string' &&
+          lead.fullName.toLowerCase() === fullName.toLowerCase() &&
+          lead.companyName.toLowerCase() === leadData.companyName!.toLowerCase()
+      );
 
       if (nameMatch) {
         matches.push({
-          existingLeadId: nameMatch.id,
+          existingLeadId: nameMatch.id as string,
           matchField: 'fullName+companyName',
           matchValue: `${fullName} @ ${leadData.companyName}`,
           confidence: 0.8,
@@ -114,9 +113,7 @@ export async function mergeLeadData(
   incoming: LeadData
 ): Promise<void> {
   try {
-    const existing = await prisma.lead.findUnique({
-      where: { id: existingLeadId },
-    });
+    const existing = await db.leads.findById(existingLeadId);
 
     if (!existing) {
       logger.warn('mergeLeadData: existing lead not found', { existingLeadId });
@@ -157,14 +154,11 @@ export async function mergeLeadData(
     if (incoming.customFields) {
       const existingCustom = (existing.customFields as Record<string, unknown>) || {};
       const mergedCustom = { ...existingCustom, ...incoming.customFields };
-      updates.customFields = mergedCustom as object;
+      updates.customFields = mergedCustom;
     }
 
     if (Object.keys(updates).length > 0) {
-      await prisma.lead.update({
-        where: { id: existingLeadId },
-        data: updates,
-      });
+      await db.leads.update(existingLeadId, updates);
 
       logger.info('Lead data merged', {
         leadId: existingLeadId,
@@ -174,13 +168,11 @@ export async function mergeLeadData(
 
     // Record the source
     if (incoming.source) {
-      await prisma.leadSourceRecord.create({
-        data: {
-          leadId: existingLeadId,
-          provider: incoming.source,
-          sourceLeadId: incoming.sourceLeadId || null,
-          rawData: incoming.rawSourceData ? (incoming.rawSourceData as object) : undefined,
-        },
+      await db.leadSourceRecords.create({
+        leadId: existingLeadId,
+        provider: incoming.source,
+        sourceLeadId: incoming.sourceLeadId || null,
+        rawData: incoming.rawSourceData || undefined,
       });
     }
   } catch (error) {

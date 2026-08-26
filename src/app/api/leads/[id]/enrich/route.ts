@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { addJob, QUEUE_NAMES } from '@/lib/queue';
 import logger from '@/lib/logger';
@@ -27,7 +27,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const { id } = await context.params;
 
-    const lead = await prisma.lead.findUnique({ where: { id } });
+    const lead = await db.leads.findById(id);
     if (!lead || lead.deletedAt) {
       return NextResponse.json(
         { success: false, error: 'Lead not found' },
@@ -51,11 +51,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
     let url = parsed.data.url;
     if (!url) {
       if (type === 'linkedin_scrape' && lead.linkedinUrl) {
-        url = lead.linkedinUrl;
+        url = lead.linkedinUrl as string;
       } else if (type === 'website_scrape' && (lead.website || lead.companyDomain)) {
-        url = lead.website || `https://${lead.companyDomain}`;
+        url = (lead.website as string) || `https://${lead.companyDomain}`;
       } else if (type === 'company_info' && lead.companyLinkedinUrl) {
-        url = lead.companyLinkedinUrl;
+        url = lead.companyLinkedinUrl as string;
       }
     }
 

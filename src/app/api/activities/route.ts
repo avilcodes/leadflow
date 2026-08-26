@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import { getActivitiesWithLeads } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import logger from '@/lib/logger';
-import type { Prisma } from '@prisma/client';
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,23 +17,18 @@ export async function GET(request: NextRequest) {
     const campaignId = searchParams.get('campaignId') || undefined;
     const eventType = searchParams.get('eventType') || undefined;
 
-    const where: Prisma.ActivityWhereInput = {};
+    const where: Record<string, unknown> = {};
     if (leadId) where.leadId = leadId;
     if (campaignId) where.campaignId = campaignId;
     if (eventType) where.eventType = eventType;
 
-    const [activities, total] = await Promise.all([
-      prisma.activity.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        include: {
-          lead: { select: { id: true, fullName: true, email: true, companyName: true } },
-        },
-      }),
-      prisma.activity.count({ where }),
-    ]);
+    const { activities, total } = await getActivitiesWithLeads({
+      where,
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      offset: (page - 1) * pageSize,
+      limit: pageSize,
+      includeLead: true,
+    });
 
     return NextResponse.json({
       success: true,

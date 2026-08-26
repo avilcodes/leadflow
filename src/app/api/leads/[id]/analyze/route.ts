@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getLeadWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { getAIProvider } from '@/providers/ai';
@@ -16,15 +16,12 @@ export async function POST(
     }
 
     const { id } = await params;
-    const lead = await prisma.lead.findUnique({
-      where: { id, deletedAt: null },
-      include: {
-        enrichmentJobs: { where: { status: 'completed' }, orderBy: { completedAt: 'desc' } },
-        aiAnalyses: { orderBy: { createdAt: 'desc' }, take: 1 },
-      },
+    const lead = await getLeadWithRelations(id, {
+      enrichmentJobs: true,
+      aiAnalyses: { limit: 1 },
     });
 
-    if (!lead) {
+    if (!lead || lead.deletedAt) {
       return NextResponse.json({ success: false, error: 'Lead not found' }, { status: 404 });
     }
 
@@ -32,72 +29,68 @@ export async function POST(
     const model = body.model || process.env.OPENROUTER_DEFAULT_MODEL || 'anthropic/claude-sonnet-4';
 
     // Gather enrichment data
-    const linkedinData = lead.enrichmentJobs.find(j => j.type === 'linkedin_scrape')?.normalizedOutput;
-    const websiteData = lead.enrichmentJobs.find(j => j.type === 'website_scrape')?.normalizedOutput;
+    const enrichmentJobs = (lead.enrichmentJobs as Array<Record<string, unknown>>) || [];
+    const completedJobs = enrichmentJobs.filter(j => j.status === 'completed');
+    const linkedinData = completedJobs.find(j => j.type === 'linkedin_scrape')?.normalizedOutput;
+    const websiteData = completedJobs.find(j => j.type === 'website_scrape')?.normalizedOutput;
 
     // Create analysis record
-    const analysis = await prisma.aiAnalysis.create({
-      data: {
-        leadId: lead.id,
-        provider: 'openrouter',
-        model,
-        status: 'running',
-        inputData: {
-          lead: { firstName: lead.firstName, lastName: lead.lastName, fullName: lead.fullName, jobTitle: lead.jobTitle, companyName: lead.companyName, email: lead.email, industry: lead.industry, location: lead.location, website: lead.website },
-        } as object,
-        startedAt: new Date(),
+    const analysis = await db.aiAnalyses.create({
+      leadId: lead.id,
+      provider: 'openrouter',
+      model,
+      status: 'running',
+      inputData: {
+        lead: { firstName: lead.firstName, lastName: lead.lastName, fullName: lead.fullName, jobTitle: lead.jobTitle, companyName: lead.companyName, email: lead.email, industry: lead.industry, location: lead.location, website: lead.website },
       },
+      startedAt: new Date(),
     });
 
     await createActivity({ eventType: 'lead.ai_analysis.started', leadId: lead.id, userId: session.userId, metadata: { analysisId: analysis.id, model } });
 
-    // Run analysis asynchronously (but in this request for simplicity - in production use queue)
     try {
       const aiProvider = getAIProvider();
       const result = await aiProvider.analyze({
         leadData: {
-          firstName: lead.firstName ?? undefined,
-          lastName: lead.lastName ?? undefined,
-          fullName: lead.fullName ?? undefined,
-          jobTitle: lead.jobTitle ?? undefined,
-          email: lead.email ?? undefined,
-          companyName: lead.companyName ?? undefined,
-          companyDomain: lead.companyDomain ?? undefined,
-          industry: lead.industry ?? undefined,
-          location: lead.location ?? undefined,
-          website: lead.website ?? undefined,
+          firstName: (lead.firstName as string) ?? undefined,
+          lastName: (lead.lastName as string) ?? undefined,
+          fullName: (lead.fullName as string) ?? undefined,
+          jobTitle: (lead.jobTitle as string) ?? undefined,
+          email: (lead.email as string) ?? undefined,
+          companyName: (lead.companyName as string) ?? undefined,
+          companyDomain: (lead.companyDomain as string) ?? undefined,
+          industry: (lead.industry as string) ?? undefined,
+          location: (lead.location as string) ?? undefined,
+          website: (lead.website as string) ?? undefined,
         },
         linkedinData: (linkedinData as Record<string, unknown>) ?? undefined,
         websiteData: (websiteData as Record<string, unknown>) ?? undefined,
       });
 
-      const updated = await prisma.aiAnalysis.update({
-        where: { id: analysis.id },
-        data: {
-          status: 'completed',
-          personSummary: result.personSummary,
-          companySummary: result.companySummary,
-          currentContext: result.currentContext,
-          signals: result.signals,
-          painPoints: result.painPoints,
-          priorities: result.priorities,
-          personalizations: result.personalizations,
-          outreachAngle: result.outreachAngle,
-          relevanceReasons: result.relevanceReasons,
-          confidenceScore: result.confidenceScore,
-          rawResponse: result.rawResponse as object,
-          tokensUsed: result.tokensUsed,
-          completedAt: new Date(),
-        },
+      const updated = await db.aiAnalyses.update(analysis.id, {
+        status: 'completed',
+        personSummary: result.personSummary,
+        companySummary: result.companySummary,
+        currentContext: result.currentContext,
+        signals: result.signals,
+        painPoints: result.painPoints,
+        priorities: result.priorities,
+        personalizations: result.personalizations,
+        outreachAngle: result.outreachAngle,
+        relevanceReasons: result.relevanceReasons,
+        confidenceScore: result.confidenceScore,
+        rawResponse: result.rawResponse,
+        tokensUsed: result.tokensUsed,
+        completedAt: new Date(),
       });
 
-      await prisma.lead.update({ where: { id: lead.id }, data: { enrichmentStatus: 'completed' } });
+      await db.leads.update(lead.id, { enrichmentStatus: 'completed' });
       await createActivity({ eventType: 'lead.ai_analysis.completed', leadId: lead.id, userId: session.userId, metadata: { analysisId: analysis.id, confidenceScore: result.confidenceScore } });
 
       return NextResponse.json({ success: true, data: updated });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'AI analysis failed';
-      await prisma.aiAnalysis.update({ where: { id: analysis.id }, data: { status: 'failed', errorMessage: errMsg } });
+      await db.aiAnalyses.update(analysis.id, { status: 'failed', errorMessage: errMsg });
       await createActivity({ eventType: 'lead.ai_analysis.failed', leadId: lead.id, errorInfo: { message: errMsg } });
       return NextResponse.json({ success: false, error: errMsg }, { status: 500 });
     }

@@ -2,7 +2,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { compare, hash } from 'bcryptjs';
 import { cookies } from 'next/headers';
 import { NextRequest } from 'next/server';
-import prisma from './db';
+import db from './db';
 
 const JWT_SECRET = new TextEncoder().encode(
   process.env.AUTH_SECRET || 'dev-secret-change-in-production-32chars'
@@ -62,12 +62,15 @@ export async function clearSession() {
 export async function getCurrentUser() {
   const session = await getSession();
   if (!session) return null;
-  const user = await prisma.user.findUnique({
-    where: { id: session.userId },
-    select: { id: true, email: true, name: true, role: true, isActive: true },
-  });
-  if (!user || !user.isActive) return null;
-  return user;
+  const userData = await db.users.findById(session.userId);
+  if (!userData || !userData.isActive) return null;
+  return {
+    id: userData.id,
+    email: userData.email as string,
+    name: userData.name as string,
+    role: userData.role as string,
+    isActive: userData.isActive as boolean,
+  };
 }
 
 export async function requireAuth() {

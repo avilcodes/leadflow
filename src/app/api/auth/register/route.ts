@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { hashPassword, createToken, setSessionCookie } from '@/lib/auth';
 import { registerSchema } from '@/lib/validation';
 import logger from '@/lib/logger';
@@ -20,9 +20,7 @@ export async function POST(request: NextRequest) {
     const normalizedEmail = email.toLowerCase().trim();
 
     // Check if user already exists
-    const existingUser = await prisma.user.findUnique({
-      where: { email: normalizedEmail },
-    });
+    const existingUser = await db.users.findByField('email', normalizedEmail);
 
     if (existingUser) {
       return NextResponse.json(
@@ -32,19 +30,17 @@ export async function POST(request: NextRequest) {
     }
 
     // First user becomes admin
-    const userCount = await prisma.user.count();
+    const userCount = await db.users.count();
     const role = userCount === 0 ? 'admin' : 'user';
 
     const passwordHash = await hashPassword(password);
 
-    const user = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        name,
-        passwordHash,
-        role,
-        lastLoginAt: new Date(),
-      },
+    const user = await db.users.create({
+      email: normalizedEmail,
+      name,
+      passwordHash,
+      role,
+      lastLoginAt: new Date(),
     });
 
     const token = await createToken(user.id, user.email, user.role);

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { verifyPassword, createToken, setSessionCookie } from '@/lib/auth';
 import { loginSchema } from '@/lib/validation';
 import logger from '@/lib/logger';
@@ -18,9 +18,7 @@ export async function POST(request: NextRequest) {
 
     const { email, password } = parsed.data;
 
-    const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase().trim() },
-    });
+    const user = await db.users.findByField('email', email.toLowerCase().trim());
 
     if (!user) {
       return NextResponse.json(
@@ -47,10 +45,7 @@ export async function POST(request: NextRequest) {
     const token = await createToken(user.id, user.email, user.role);
     await setSessionCookie(token);
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    });
+    await db.users.update(user.id, { lastLoginAt: new Date() });
 
     logger.info('User logged in', { userId: user.id, email: user.email });
 

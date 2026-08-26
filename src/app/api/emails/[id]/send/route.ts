@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getEmailWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { getEmailProvider } from '@/providers/email';
@@ -20,16 +20,13 @@ export async function POST(
     }
 
     const { id } = await params;
-    const email = await prisma.emailMessage.findUnique({
-      where: { id },
-      include: { lead: true, campaign: true },
-    });
+    const email = await getEmailWithRelations(id, { lead: true, campaign: true });
 
     if (!email) {
       return NextResponse.json({ success: false, error: 'Email not found' }, { status: 404 });
     }
 
-    if (!['approved', 'edited', 'generated'].includes(email.status)) {
+    if (!['approved', 'edited', 'generated'].includes(email.status as string)) {
       return NextResponse.json({ success: false, error: `Cannot send email in ${email.status} status` }, { status: 400 });
     }
 
@@ -37,41 +34,54 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'No recipient email address' }, { status: 400 });
     }
 
+    const lead = email.lead as Record<string, unknown>;
+    const campaign = email.campaign as Record<string, unknown> | null;
+
     // Check suppression
-    if (email.lead.doNotContact || email.lead.unsubscribed || email.lead.bounced) {
+    if (lead?.doNotContact || lead?.unsubscribed || lead?.bounced) {
       return NextResponse.json({ success: false, error: 'Recipient is suppressed' }, { status: 400 });
     }
 
-    const suppressed = await prisma.suppressionEntry.findUnique({ where: { email: email.recipientEmail } });
+    const suppressed = await db.suppressionEntries.findByField('email', email.recipientEmail);
     if (suppressed) {
       return NextResponse.json({ success: false, error: `Recipient suppressed: ${suppressed.reason}` }, { status: 400 });
     }
 
-    const senderEmail = email.senderEmail || email.campaign?.senderEmail;
+    const senderEmail = (email.senderEmail as string) || (campaign?.senderEmail as string);
     if (!senderEmail) {
       return NextResponse.json({ success: false, error: 'No sender email configured' }, { status: 400 });
     }
 
     const emailProvider = getEmailProvider();
     const result = await emailProvider.sendEmail({
-      to: { email: email.recipientEmail, name: email.recipientName || undefined },
-      from: { email: senderEmail, name: email.senderName || email.campaign?.senderName || undefined },
-      replyTo: email.campaign?.replyToEmail ? { email: email.campaign.replyToEmail } : undefined,
-      subject: email.subject || '',
-      htmlContent: email.htmlBody || '',
-      textContent: email.textBody || undefined,
+      to: { email: email.recipientEmail as string, name: (email.recipientName as string) || undefined },
+      from: { email: senderEmail, name: (email.senderName as string) || (campaign?.senderName as string) || undefined },
+      replyTo: campaign?.replyToEmail ? { email: campaign.replyToEmail as string } : undefined,
+      subject: (email.subject as string) || '',
+      htmlContent: (email.htmlBody as string) || '',
+      textContent: (email.textBody as string) || undefined,
     });
 
-    await prisma.emailMessage.update({
-      where: { id },
-      data: { status: 'sent', provider: result.provider, providerMessageId: result.messageId, sentAt: new Date() },
+    await db.emailMessages.update(id, {
+      status: 'sent',
+      provider: result.provider,
+      providerMessageId: result.messageId,
+      sentAt: new Date(),
     });
 
-    await prisma.lead.update({ where: { id: email.leadId }, data: { outreachStatus: 'sent' } });
-    await createActivity({ eventType: 'email.sent', leadId: email.leadId, campaignId: email.campaignId ?? undefined, emailMessageId: id, userId: session.userId, provider: 'brevo', metadata: { messageId: result.messageId } });
+    await db.leads.update(email.leadId as string, { outreachStatus: 'sent' });
+    await createActivity({
+      eventType: 'email.sent',
+      leadId: email.leadId as string,
+      campaignId: (email.campaignId as string) ?? undefined,
+      emailMessageId: id,
+      userId: session.userId,
+      provider: 'brevo',
+      metadata: { messageId: result.messageId },
+    });
 
     if (email.campaignId) {
-      await prisma.campaign.update({ where: { id: email.campaignId }, data: { emailsSent: { increment: 1 } } });
+      await db.campaigns.increment(email.campaignId as string, 'emailsSent', 1);
     }
 
     return NextResponse.json({ success: true, data: { messageId: result.messageId, status: 'sent' } });

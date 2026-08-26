@@ -10,12 +10,12 @@ services:
     volumes:
       - .:/workspace:cached
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://leadflow:leadflow@db:5432/leadflow
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
       - REDIS_URL=redis://redis:6379
       - AUTH_SECRET=dev-secret-change-in-production-32chars
       - NEXTAUTH_URL=http://localhost:3000
@@ -29,35 +29,19 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
       - .:/workspace:cached
     environment:
-      - DATABASE_URL=postgresql://leadflow:leadflow@db:5432/leadflow
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
       - REDIS_URL=redis://redis:6379
       - NODE_ENV=development
       - EMAIL_SENDING_ENABLED=false
     command: npm run worker
     restart: unless-stopped
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: leadflow
-      POSTGRES_PASSWORD: leadflow
-      POSTGRES_DB: leadflow
-    ports:
-      - '5432:5432'
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U leadflow']
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -72,5 +56,4 @@ services:
       retries: 5
 
 volumes:
-  pgdata:
   redisdata:

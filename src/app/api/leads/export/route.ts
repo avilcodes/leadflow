@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { searchLeads } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { leadFiltersSchema } from '@/lib/validation';
 import { stringify } from 'csv-stringify/sync';
 import logger from '@/lib/logger';
-import type { Prisma } from '@prisma/client';
 
 export async function GET(request: NextRequest) {
   try {
@@ -22,7 +21,6 @@ export async function GET(request: NextRequest) {
       (searchParams as Record<string, unknown>).tags = tagsParam;
     }
 
-    // Use same filters as list endpoint but ignore pagination
     const parsed = leadFiltersSchema.safeParse({ ...searchParams, pageSize: 100 });
     if (!parsed.success) {
       return NextResponse.json(
@@ -31,63 +29,51 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const {
-      search, status, enrichmentStatus, outreachStatus, source,
-      companyName, industry, location, tags, sortBy, sortOrder,
-    } = parsed.data;
-
-    const where: Prisma.LeadWhereInput = { deletedAt: null };
-
-    if (search) {
-      where.OR = [
-        { fullName: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
-        { companyName: { contains: search, mode: 'insensitive' } },
-      ];
-    }
-    if (status) where.status = status;
-    if (enrichmentStatus) where.enrichmentStatus = enrichmentStatus;
-    if (outreachStatus) where.outreachStatus = outreachStatus;
-    if (source) where.source = source;
-    if (companyName) where.companyName = { contains: companyName, mode: 'insensitive' };
-    if (industry) where.industry = { contains: industry, mode: 'insensitive' };
-    if (location) where.location = { contains: location, mode: 'insensitive' };
-    if (tags && tags.length > 0) {
-      where.leadTags = { some: { tag: { name: { in: tags } } } };
-    }
-
-    const leads = await prisma.lead.findMany({
-      where,
-      include: {
-        leadTags: { include: { tag: true } },
-      },
-      orderBy: { [sortBy]: sortOrder },
-      take: 10000, // Cap at 10k for export
+    // Use searchLeads with large page size for export
+    const { leads } = await searchLeads({
+      ...parsed.data,
+      page: 1,
+      pageSize: 10000,
     });
 
-    const rows = leads.map((lead) => ({
+    // Load tags for each lead
+    const leadsWithTags = await Promise.all(
+      leads.map(async (lead) => {
+        const tagDocs = await db.leadTags.findMany({ where: { leadId: lead.id } });
+        const tags = await Promise.all(
+          tagDocs.map(async (lt) => {
+            const tag = await db.tags.findById(lt.tagId as string);
+            return tag?.name || '';
+          })
+        );
+        return { ...lead, tagNames: tags.filter(Boolean) };
+      })
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = leadsWithTags.map((lead: any) => ({
       id: lead.id,
-      first_name: lead.firstName || '',
-      last_name: lead.lastName || '',
-      full_name: lead.fullName || '',
-      job_title: lead.jobTitle || '',
-      email: lead.email || '',
-      phone: lead.phone || '',
-      linkedin_url: lead.linkedinUrl || '',
-      location: lead.location || '',
-      website: lead.website || '',
-      company_name: lead.companyName || '',
-      company_domain: lead.companyDomain || '',
-      industry: lead.industry || '',
-      company_size: lead.companySize || '',
-      revenue: lead.revenue || '',
-      funding: lead.funding || '',
-      status: lead.status,
-      enrichment_status: lead.enrichmentStatus,
-      outreach_status: lead.outreachStatus,
-      source: lead.source || '',
-      tags: lead.leadTags.map((lt) => lt.tag.name).join(', '),
-      created_at: lead.createdAt.toISOString(),
+      first_name: (lead.firstName as string) || '',
+      last_name: (lead.lastName as string) || '',
+      full_name: (lead.fullName as string) || '',
+      job_title: (lead.jobTitle as string) || '',
+      email: (lead.email as string) || '',
+      phone: (lead.phone as string) || '',
+      linkedin_url: (lead.linkedinUrl as string) || '',
+      location: (lead.location as string) || '',
+      website: (lead.website as string) || '',
+      company_name: (lead.companyName as string) || '',
+      company_domain: (lead.companyDomain as string) || '',
+      industry: (lead.industry as string) || '',
+      company_size: (lead.companySize as string) || '',
+      revenue: (lead.revenue as string) || '',
+      funding: (lead.funding as string) || '',
+      status: lead.status as string,
+      enrichment_status: lead.enrichmentStatus as string,
+      outreach_status: lead.outreachStatus as string,
+      source: (lead.source as string) || '',
+      tags: (lead.tagNames as string[]).join(', '),
+      created_at: lead.createdAt instanceof Date ? lead.createdAt.toISOString() : String(lead.createdAt || ''),
     }));
 
     const csv = stringify(rows, { header: true });

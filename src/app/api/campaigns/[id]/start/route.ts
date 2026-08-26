@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { getEmailProvider } from '@/providers/email';
@@ -16,25 +16,22 @@ export async function POST(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({
-      where: { id },
-      include: {
-        emailMessages: {
-          where: { status: 'approved' },
-          include: { lead: true },
-        },
-      },
-    });
+    const campaign = await db.campaigns.findById(id);
 
     if (!campaign) {
       return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 });
     }
 
-    if (!['draft', 'ready', 'paused'].includes(campaign.status)) {
+    if (!['draft', 'ready', 'paused'].includes(campaign.status as string)) {
       return NextResponse.json({ success: false, error: `Cannot start campaign in ${campaign.status} status` }, { status: 400 });
     }
 
-    if (campaign.emailMessages.length === 0) {
+    // Get approved emails with their leads
+    const approvedEmails = await db.emailMessages.findMany({
+      where: { campaignId: id, status: 'approved' },
+    });
+
+    if (approvedEmails.length === 0) {
       return NextResponse.json({ success: false, error: 'No approved emails to send' }, { status: 400 });
     }
 
@@ -42,75 +39,67 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Email sending is disabled. Set EMAIL_SENDING_ENABLED=true in environment.' }, { status: 400 });
     }
 
-    await prisma.campaign.update({
-      where: { id },
-      data: { status: 'running', startedAt: new Date() },
-    });
-
+    await db.campaigns.update(id, { status: 'running', startedAt: new Date() });
     await createActivity({ eventType: 'campaign.started', campaignId: id, userId: session.userId });
 
-    // Send emails
     const emailProvider = getEmailProvider();
     let sent = 0;
     let failed = 0;
 
-    for (const email of campaign.emailMessages) {
-      const lead = email.lead;
+    for (const email of approvedEmails) {
+      const lead = await db.leads.findById(email.leadId as string);
+      if (!lead) { failed++; continue; }
 
-      // Check suppression
       if (lead.doNotContact || lead.unsubscribed || lead.bounced) {
-        await prisma.emailMessage.update({ where: { id: email.id }, data: { status: 'failed', errorMessage: 'Lead suppressed' } });
+        await db.emailMessages.update(email.id, { status: 'failed', errorMessage: 'Lead suppressed' });
         failed++;
         continue;
       }
 
       if (!email.recipientEmail) {
-        await prisma.emailMessage.update({ where: { id: email.id }, data: { status: 'failed', errorMessage: 'No recipient email' } });
+        await db.emailMessages.update(email.id, { status: 'failed', errorMessage: 'No recipient email' });
         failed++;
         continue;
       }
 
       try {
         const result = await emailProvider.sendEmail({
-          to: { email: email.recipientEmail, name: email.recipientName || undefined },
-          from: { email: email.senderEmail || campaign.senderEmail || '', name: email.senderName || campaign.senderName || undefined },
-          replyTo: campaign.replyToEmail ? { email: campaign.replyToEmail } : undefined,
-          subject: email.subject || '',
-          htmlContent: email.htmlBody || '',
-          textContent: email.textBody || undefined,
-          tags: [campaign.name],
+          to: { email: email.recipientEmail as string, name: (email.recipientName as string) || undefined },
+          from: { email: (email.senderEmail as string) || (campaign.senderEmail as string) || '', name: (email.senderName as string) || (campaign.senderName as string) || undefined },
+          replyTo: campaign.replyToEmail ? { email: campaign.replyToEmail as string } : undefined,
+          subject: (email.subject as string) || '',
+          htmlContent: (email.htmlBody as string) || '',
+          textContent: (email.textBody as string) || undefined,
+          tags: [campaign.name as string],
         });
 
-        await prisma.emailMessage.update({
-          where: { id: email.id },
-          data: {
-            status: 'sent',
-            provider: result.provider,
-            providerMessageId: result.messageId,
-            sentAt: new Date(),
-          },
+        await db.emailMessages.update(email.id, {
+          status: 'sent',
+          provider: result.provider,
+          providerMessageId: result.messageId,
+          sentAt: new Date(),
         });
 
-        await prisma.lead.update({ where: { id: lead.id }, data: { outreachStatus: 'sent' } });
+        await db.leads.update(lead.id, { outreachStatus: 'sent' });
         await createActivity({ eventType: 'email.sent', leadId: lead.id, campaignId: id, emailMessageId: email.id, provider: 'brevo', metadata: { messageId: result.messageId } });
         sent++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Send failed';
-        await prisma.emailMessage.update({ where: { id: email.id }, data: { status: 'failed', errorMessage: msg } });
+        await db.emailMessages.update(email.id, { status: 'failed', errorMessage: msg });
         failed++;
       }
 
       // Rate limiting delay
-      const rateLimit = campaign.maxPerHour || parseInt(process.env.EMAIL_RATE_LIMIT_PER_HOUR || '50');
+      const rateLimit = (campaign.maxPerHour as number) || parseInt(process.env.EMAIL_RATE_LIMIT_PER_HOUR || '50');
       const delayMs = Math.ceil(3600000 / rateLimit);
       await new Promise(resolve => setTimeout(resolve, Math.min(delayMs, 5000)));
     }
 
-    const finalStatus = failed === campaign.emailMessages.length ? 'failed' : 'completed';
-    await prisma.campaign.update({
-      where: { id },
-      data: { status: finalStatus, emailsSent: { increment: sent }, completedAt: new Date() },
-    });
+    const finalStatus = failed === approvedEmails.length ? 'failed' : 'completed';
+    await db.campaigns.update(id, { status: finalStatus, completedAt: new Date() });
+    if (sent > 0) {
+      await db.campaigns.increment(id, 'emailsSent', sent);
+    }
 
     await createActivity({ eventType: finalStatus === 'completed' ? 'campaign.completed' : 'campaign.failed', campaignId: id, userId: session.userId, metadata: { sent, failed } });
 

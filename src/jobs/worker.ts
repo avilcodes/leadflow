@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import { redisConnection, closeAllQueues } from './queues';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import logger from '@/lib/logger';
 import { createActivity } from '@/lib/activity';
 import { deduplicateImport } from '@/lib/deduplication';
@@ -14,20 +14,15 @@ import type { LeadData } from '@/types';
 // ─── Helper: get decrypted API key ───
 
 async function getApiKey(provider: string): Promise<string> {
-  const credential = await prisma.apiCredential.findUnique({
-    where: { provider },
-  });
+  const credential = await db.apiCredentials.findByField('provider', provider);
   if (!credential || !credential.isActive) {
     throw new Error(`No active API credential found for provider: ${provider}`);
   }
-  // In production, this would decrypt the key. For now, we store it as-is.
-  return credential.encryptedKey;
+  return credential.encryptedKey as string;
 }
 
 async function getProviderConfig(provider: string): Promise<Record<string, unknown> | undefined> {
-  const credential = await prisma.apiCredential.findUnique({
-    where: { provider },
-  });
+  const credential = await db.apiCredentials.findByField('provider', provider);
   return (credential?.config as Record<string, unknown>) || undefined;
 }
 
@@ -63,57 +58,50 @@ async function processLeadImport(job: Job) {
       || [lead.firstName, lead.lastName].filter(Boolean).join(' ')
       || null;
 
-    const created = await prisma.lead.create({
-      data: {
-        firstName: lead.firstName || null,
-        lastName: lead.lastName || null,
-        fullName,
-        jobTitle: lead.jobTitle || null,
-        email: lead.email?.toLowerCase().trim() || null,
-        phone: lead.phone || null,
-        linkedinUrl: lead.linkedinUrl || null,
-        location: lead.location || null,
-        website: lead.website || null,
-        companyName: lead.companyName || null,
-        companyDomain: lead.companyDomain || null,
-        companyLinkedinUrl: lead.companyLinkedinUrl || null,
-        industry: lead.industry || null,
-        companySize: lead.companySize || null,
-        revenue: lead.revenue || null,
-        funding: lead.funding || null,
-        source: lead.source || source,
-        sourceLeadId: lead.sourceLeadId || null,
-        importedAt: new Date(),
-        rawSourceData: lead.rawSourceData ? (lead.rawSourceData as object) : undefined,
-        customFields: lead.customFields ? (lead.customFields as object) : undefined,
-      },
+    const created = await db.leads.create({
+      firstName: lead.firstName || null,
+      lastName: lead.lastName || null,
+      fullName,
+      jobTitle: lead.jobTitle || null,
+      email: lead.email?.toLowerCase().trim() || null,
+      phone: lead.phone || null,
+      linkedinUrl: lead.linkedinUrl || null,
+      location: lead.location || null,
+      website: lead.website || null,
+      companyName: lead.companyName || null,
+      companyDomain: lead.companyDomain || null,
+      companyLinkedinUrl: lead.companyLinkedinUrl || null,
+      industry: lead.industry || null,
+      companySize: lead.companySize || null,
+      revenue: lead.revenue || null,
+      funding: lead.funding || null,
+      source: lead.source || source,
+      sourceLeadId: lead.sourceLeadId || null,
+      importedAt: new Date(),
+      rawSourceData: lead.rawSourceData || undefined,
+      customFields: lead.customFields || undefined,
+      status: 'new',
+      enrichmentStatus: 'none',
+      outreachStatus: 'none',
+      deletedAt: null,
     });
     createdLeads.push(created.id);
 
     // Record source
-    await prisma.leadSourceRecord.create({
-      data: {
-        leadId: created.id,
-        provider: lead.source || source,
-        sourceLeadId: lead.sourceLeadId || null,
-        rawData: lead.rawSourceData ? (lead.rawSourceData as object) : undefined,
-        importBatchId: batchId || null,
-      },
+    await db.leadSourceRecords.create({
+      leadId: created.id,
+      provider: lead.source || source,
+      sourceLeadId: lead.sourceLeadId || null,
+      rawData: lead.rawSourceData || undefined,
+      importBatchId: batchId || null,
+      importedAt: new Date(),
     });
 
     // Add tags if specified
     if (tags && tags.length > 0) {
       for (const tagName of tags) {
-        const tag = await prisma.tag.upsert({
-          where: { name: tagName },
-          update: {},
-          create: { name: tagName },
-        });
-        await prisma.leadTag.create({
-          data: { leadId: created.id, tagId: tag.id },
-        }).catch(() => {
-          // Ignore duplicate tag assignments
-        });
+        const tag = await db.tags.upsert('name', tagName, {}, { name: tagName });
+        await db.leadTags.create({ leadId: created.id, tagId: tag.id }).catch(() => {});
       }
     }
   }
@@ -151,23 +139,17 @@ async function processEnrichment(job: Job) {
   const config = await getProviderConfig(providerName || 'apify');
   const provider = createEnrichmentProvider(providerName || 'apify', apiKey, config);
 
-  // Create enrichment job record
-  const enrichmentJob = await prisma.enrichmentJob.create({
-    data: {
-      leadId,
-      provider: providerName || 'apify',
-      actorId: actorId || null,
-      type,
-      status: 'running',
-      input: { url, additionalInput },
-      startedAt: new Date(),
-    },
+  const enrichmentJob = await db.enrichmentJobs.create({
+    leadId,
+    provider: providerName || 'apify',
+    actorId: actorId || null,
+    type,
+    status: 'running',
+    input: { url, additionalInput },
+    startedAt: new Date(),
   });
 
-  await prisma.lead.update({
-    where: { id: leadId },
-    data: { enrichmentStatus: 'in_progress' },
-  });
+  await db.leads.update(leadId, { enrichmentStatus: 'in_progress' });
 
   await createActivity({
     eventType: 'lead.enrichment.started',
@@ -176,29 +158,18 @@ async function processEnrichment(job: Job) {
     metadata: { type, enrichmentJobId: enrichmentJob.id },
   });
 
-  const result = await provider.enrich({
-    leadId,
-    type,
-    url,
-    additionalInput,
-  });
+  const result = await provider.enrich({ leadId, type, url, additionalInput });
 
   if (result.status === 'completed') {
-    await prisma.enrichmentJob.update({
-      where: { id: enrichmentJob.id },
-      data: {
-        status: 'completed',
-        providerJobId: result.jobId || null,
-        rawOutput: result.rawOutput ? (result.rawOutput as object) : undefined,
-        normalizedOutput: result.normalizedOutput ? (result.normalizedOutput as object) : undefined,
-        completedAt: new Date(),
-      },
+    await db.enrichmentJobs.update(enrichmentJob.id, {
+      status: 'completed',
+      providerJobId: result.jobId || null,
+      rawOutput: result.rawOutput || undefined,
+      normalizedOutput: result.normalizedOutput || undefined,
+      completedAt: new Date(),
     });
 
-    await prisma.lead.update({
-      where: { id: leadId },
-      data: { enrichmentStatus: 'completed' },
-    });
+    await db.leads.update(leadId, { enrichmentStatus: 'completed' });
 
     await createActivity({
       eventType: 'lead.enrichment.completed',
@@ -207,31 +178,19 @@ async function processEnrichment(job: Job) {
       metadata: { type, enrichmentJobId: enrichmentJob.id },
     });
   } else if (result.status === 'running') {
-    // Store the job ID for polling
-    await prisma.enrichmentJob.update({
-      where: { id: enrichmentJob.id },
-      data: {
-        providerJobId: result.jobId || null,
-        rawOutput: result.rawOutput ? (result.rawOutput as object) : undefined,
-      },
+    await db.enrichmentJobs.update(enrichmentJob.id, {
+      providerJobId: result.jobId || null,
+      rawOutput: result.rawOutput || undefined,
     });
-
-    // The polling will be handled by a separate scheduled check or webhook
     return { status: 'running', jobId: result.jobId, enrichmentJobId: enrichmentJob.id };
   } else {
-    await prisma.enrichmentJob.update({
-      where: { id: enrichmentJob.id },
-      data: {
-        status: 'failed',
-        errorMessage: result.error || 'Unknown error',
-        completedAt: new Date(),
-      },
+    await db.enrichmentJobs.update(enrichmentJob.id, {
+      status: 'failed',
+      errorMessage: result.error || 'Unknown error',
+      completedAt: new Date(),
     });
 
-    await prisma.lead.update({
-      where: { id: leadId },
-      data: { enrichmentStatus: 'failed' },
-    });
+    await db.leads.update(leadId, { enrichmentStatus: 'failed' });
 
     await createActivity({
       eventType: 'lead.enrichment.failed',
@@ -261,32 +220,21 @@ async function processAiAnalysis(job: Job) {
     ...(model ? { analysisModel: model } : {}),
   });
 
-  const lead = await prisma.lead.findUnique({
-    where: { id: leadId },
-    include: {
-      enrichmentJobs: {
-        where: { status: 'completed' },
-        orderBy: { completedAt: 'desc' },
-      },
-      aiAnalyses: {
-        where: { status: 'completed' },
-        orderBy: { completedAt: 'desc' },
-        take: 1,
-      },
-    },
-  });
-
+  const lead = await db.leads.findById(leadId);
   if (!lead) throw new Error(`Lead not found: ${leadId}`);
 
-  // Create analysis record
-  const analysis = await prisma.aiAnalysis.create({
-    data: {
-      leadId,
-      provider: 'openrouter',
-      model: model || config?.defaultModel as string || 'anthropic/claude-sonnet-4',
-      status: 'running',
-      startedAt: new Date(),
-    },
+  // Load related data
+  const enrichmentJobs = await db.enrichmentJobs.findMany({
+    where: { leadId, status: 'completed' },
+    orderBy: { field: 'completedAt', direction: 'desc' },
+  });
+
+  const analysis = await db.aiAnalyses.create({
+    leadId,
+    provider: 'openrouter',
+    model: model || (config?.defaultModel as string) || 'anthropic/claude-sonnet-4',
+    status: 'running',
+    startedAt: new Date(),
   });
 
   await createActivity({
@@ -296,63 +244,59 @@ async function processAiAnalysis(job: Job) {
   });
 
   try {
-    // Gather enrichment data
     const enrichmentData: Record<string, unknown> = {};
     const linkedinData: Record<string, unknown> = {};
     const websiteData: Record<string, unknown> = {};
 
-    for (const ej of lead.enrichmentJobs) {
-      const output = ej.normalizedOutput || ej.rawOutput;
+    for (const ej of enrichmentJobs) {
+      const output = (ej.normalizedOutput || ej.rawOutput) as Record<string, unknown> | null;
       if (!output) continue;
       if (ej.type === 'linkedin_scrape') {
-        Object.assign(linkedinData, output as Record<string, unknown>);
+        Object.assign(linkedinData, output);
       } else if (ej.type === 'website_scrape') {
-        Object.assign(websiteData, output as Record<string, unknown>);
+        Object.assign(websiteData, output);
       } else {
-        Object.assign(enrichmentData, output as Record<string, unknown>);
+        Object.assign(enrichmentData, output);
       }
     }
 
     const result = await aiProvider.analyze({
       leadData: {
-        firstName: lead.firstName || undefined,
-        lastName: lead.lastName || undefined,
-        fullName: lead.fullName || undefined,
-        jobTitle: lead.jobTitle || undefined,
-        email: lead.email || undefined,
-        linkedinUrl: lead.linkedinUrl || undefined,
-        location: lead.location || undefined,
-        companyName: lead.companyName || undefined,
-        companyDomain: lead.companyDomain || undefined,
-        industry: lead.industry || undefined,
-        companySize: lead.companySize || undefined,
-        revenue: lead.revenue || undefined,
-        funding: lead.funding || undefined,
+        firstName: (lead.firstName as string) || undefined,
+        lastName: (lead.lastName as string) || undefined,
+        fullName: (lead.fullName as string) || undefined,
+        jobTitle: (lead.jobTitle as string) || undefined,
+        email: (lead.email as string) || undefined,
+        linkedinUrl: (lead.linkedinUrl as string) || undefined,
+        location: (lead.location as string) || undefined,
+        companyName: (lead.companyName as string) || undefined,
+        companyDomain: (lead.companyDomain as string) || undefined,
+        industry: (lead.industry as string) || undefined,
+        companySize: (lead.companySize as string) || undefined,
+        revenue: (lead.revenue as string) || undefined,
+        funding: (lead.funding as string) || undefined,
       },
       enrichmentData: Object.keys(enrichmentData).length > 0 ? enrichmentData : undefined,
       linkedinData: Object.keys(linkedinData).length > 0 ? linkedinData : undefined,
       websiteData: Object.keys(websiteData).length > 0 ? websiteData : undefined,
     });
 
-    await prisma.aiAnalysis.update({
-      where: { id: analysis.id },
-      data: {
-        status: 'completed',
-        personSummary: result.personSummary,
-        companySummary: result.companySummary,
-        currentContext: result.currentContext,
-        signals: result.signals,
-        painPoints: result.painPoints,
-        priorities: result.priorities,
-        personalizations: result.personalizations,
-        outreachAngle: result.outreachAngle,
-        relevanceReasons: result.relevanceReasons,
-        confidenceScore: result.confidenceScore,
-        rawResponse: result.rawResponse as object,
-        tokensUsed: result.tokensUsed || null,
-        model: result.model,
-        completedAt: new Date(),
-      },
+    await db.aiAnalyses.update(analysis.id, {
+      status: 'completed',
+      personSummary: result.personSummary,
+      companySummary: result.companySummary,
+      currentContext: result.currentContext,
+      signals: result.signals,
+      painPoints: result.painPoints,
+      priorities: result.priorities,
+      personalizations: result.personalizations,
+      outreachAngle: result.outreachAngle,
+      relevanceReasons: result.relevanceReasons,
+      confidenceScore: result.confidenceScore,
+      rawResponse: result.rawResponse,
+      tokensUsed: result.tokensUsed || null,
+      model: result.model,
+      completedAt: new Date(),
     });
 
     await createActivity({
@@ -365,13 +309,10 @@ async function processAiAnalysis(job: Job) {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    await prisma.aiAnalysis.update({
-      where: { id: analysis.id },
-      data: {
-        status: 'failed',
-        errorMessage,
-        completedAt: new Date(),
-      },
+    await db.aiAnalyses.update(analysis.id, {
+      status: 'failed',
+      errorMessage,
+      completedAt: new Date(),
     });
 
     await createActivity({
@@ -399,103 +340,89 @@ async function processEmailGeneration(job: Job) {
     ...(model ? { emailModel: model } : {}),
   });
 
-  const lead = await prisma.lead.findUnique({ where: { id: leadId } });
+  const lead = await db.leads.findById(leadId);
   if (!lead) throw new Error(`Lead not found: ${leadId}`);
 
-  const campaign = campaignId
-    ? await prisma.campaign.findUnique({ where: { id: campaignId } })
-    : null;
+  const campaign = campaignId ? await db.campaigns.findById(campaignId) : null;
 
-  // Get latest analysis
-  const latestAnalysis = await prisma.aiAnalysis.findFirst({
-    where: { leadId, status: 'completed' },
-    orderBy: { completedAt: 'desc' },
-  });
+  const latestAnalysis = await db.aiAnalyses.findFirst(
+    { leadId, status: 'completed' },
+    { field: 'completedAt', direction: 'desc' }
+  );
 
   if (!latestAnalysis) {
     throw new Error(`No completed AI analysis found for lead: ${leadId}. Run analysis first.`);
   }
 
   const analysisResult = {
-    personSummary: latestAnalysis.personSummary || '',
-    companySummary: latestAnalysis.companySummary || '',
-    currentContext: latestAnalysis.currentContext || '',
+    personSummary: (latestAnalysis.personSummary as string) || '',
+    companySummary: (latestAnalysis.companySummary as string) || '',
+    currentContext: (latestAnalysis.currentContext as string) || '',
     signals: (latestAnalysis.signals as string[]) || [],
     painPoints: (latestAnalysis.painPoints as string[]) || [],
     priorities: (latestAnalysis.priorities as string[]) || [],
     personalizations: (latestAnalysis.personalizations as string[]) || [],
-    outreachAngle: latestAnalysis.outreachAngle || '',
+    outreachAngle: (latestAnalysis.outreachAngle as string) || '',
     relevanceReasons: (latestAnalysis.relevanceReasons as string[]) || [],
-    confidenceScore: latestAnalysis.confidenceScore || 0.5,
+    confidenceScore: (latestAnalysis.confidenceScore as number) || 0.5,
     rawResponse: (latestAnalysis.rawResponse as Record<string, unknown>) || {},
-    model: latestAnalysis.model,
+    model: latestAnalysis.model as string,
   };
 
   const result = await aiProvider.generateEmail({
     leadData: {
-      firstName: lead.firstName || undefined,
-      lastName: lead.lastName || undefined,
-      fullName: lead.fullName || undefined,
-      jobTitle: lead.jobTitle || undefined,
-      email: lead.email || undefined,
-      linkedinUrl: lead.linkedinUrl || undefined,
-      location: lead.location || undefined,
-      companyName: lead.companyName || undefined,
-      companyDomain: lead.companyDomain || undefined,
-      industry: lead.industry || undefined,
-      companySize: lead.companySize || undefined,
+      firstName: (lead.firstName as string) || undefined,
+      lastName: (lead.lastName as string) || undefined,
+      fullName: (lead.fullName as string) || undefined,
+      jobTitle: (lead.jobTitle as string) || undefined,
+      email: (lead.email as string) || undefined,
+      linkedinUrl: (lead.linkedinUrl as string) || undefined,
+      location: (lead.location as string) || undefined,
+      companyName: (lead.companyName as string) || undefined,
+      companyDomain: (lead.companyDomain as string) || undefined,
+      industry: (lead.industry as string) || undefined,
+      companySize: (lead.companySize as string) || undefined,
     },
     analysis: analysisResult,
     campaignConfig: {
-      objective: campaign?.objective || undefined,
-      targetAudience: campaign?.targetAudience || undefined,
-      productDescription: campaign?.productDescription || undefined,
-      valueProposition: campaign?.valueProposition || undefined,
-      tone: campaign?.tone || undefined,
-      emailLength: campaign?.emailLength || undefined,
-      cta: campaign?.cta || undefined,
-      customInstructions: campaign?.customInstructions || undefined,
-      senderName: campaign?.senderName || undefined,
+      objective: (campaign?.objective as string) || undefined,
+      targetAudience: (campaign?.targetAudience as string) || undefined,
+      productDescription: (campaign?.productDescription as string) || undefined,
+      valueProposition: (campaign?.valueProposition as string) || undefined,
+      tone: (campaign?.tone as string) || undefined,
+      emailLength: (campaign?.emailLength as string) || undefined,
+      cta: (campaign?.cta as string) || undefined,
+      customInstructions: (campaign?.customInstructions as string) || undefined,
+      senderName: (campaign?.senderName as string) || undefined,
     },
   });
 
-  const emailMessage = await prisma.emailMessage.create({
-    data: {
-      campaignId: campaignId || null,
-      leadId,
-      subject: result.subject,
-      htmlBody: result.htmlBody,
-      textBody: result.textBody,
-      aiModel: result.model,
-      aiPrompt: undefined,
-      aiRawResponse: result.rawResponse as object,
-      status: campaign?.autoApprove ? 'approved' : 'generated',
-      senderName: campaign?.senderName || null,
-      senderEmail: campaign?.senderEmail || null,
-      recipientEmail: lead.email || null,
-      recipientName: lead.fullName || lead.firstName || null,
-      ...(campaign?.autoApprove ? { approvedAt: new Date() } : {}),
-    },
+  const emailMessage = await db.emailMessages.create({
+    campaignId: campaignId || null,
+    leadId,
+    subject: result.subject,
+    htmlBody: result.htmlBody,
+    textBody: result.textBody,
+    aiModel: result.model,
+    aiRawResponse: result.rawResponse,
+    status: campaign?.autoApprove ? 'approved' : 'generated',
+    senderName: (campaign?.senderName as string) || null,
+    senderEmail: (campaign?.senderEmail as string) || null,
+    recipientEmail: (lead.email as string) || null,
+    recipientName: (lead.fullName as string) || (lead.firstName as string) || null,
+    ...(campaign?.autoApprove ? { approvedAt: new Date() } : {}),
   });
 
   // Update campaign lead status
   if (campaignId) {
-    await prisma.campaignLead.updateMany({
-      where: { campaignId, leadId },
-      data: { status: campaign?.autoApprove ? 'approved' : 'email_generated' },
-    });
-
-    await prisma.campaign.update({
-      where: { id: campaignId },
-      data: { emailsGenerated: { increment: 1 } },
-    });
+    const cl = await db.campaignLeads.findFirst({ campaignId, leadId });
+    if (cl) {
+      await db.campaignLeads.update(cl.id, { status: campaign?.autoApprove ? 'approved' : 'email_generated' });
+    }
+    await db.campaigns.increment(campaignId, 'emailsGenerated', 1);
   }
 
-  // Update lead outreach status
-  await prisma.lead.update({
-    where: { id: leadId },
-    data: { outreachStatus: 'draft' },
-  });
+  await db.leads.update(leadId, { outreachStatus: 'draft' });
 
   await createActivity({
     eventType: 'email.generated',
@@ -515,35 +442,28 @@ async function processCampaignSend(job: Job) {
 
   logger.info('Processing campaign send', { emailMessageId, campaignId });
 
-  const emailMessage = await prisma.emailMessage.findUnique({
-    where: { id: emailMessageId },
-    include: { lead: true, campaign: true },
-  });
-
+  const emailMessage = await db.emailMessages.findById(emailMessageId);
   if (!emailMessage) throw new Error(`Email message not found: ${emailMessageId}`);
+
+  const lead = await db.leads.findById(emailMessage.leadId as string);
+  const campaign = emailMessage.campaignId ? await db.campaigns.findById(emailMessage.campaignId as string) : null;
+
   if (emailMessage.status !== 'approved' && emailMessage.status !== 'queued') {
     throw new Error(`Email not in sendable state: ${emailMessage.status}`);
   }
 
-  if (!emailMessage.recipientEmail || !emailMessage.lead.email) {
+  if (!emailMessage.recipientEmail || !lead?.email) {
     throw new Error('No recipient email address');
   }
 
   // Check suppression list
-  const suppressed = await prisma.suppressionEntry.findUnique({
-    where: { email: emailMessage.recipientEmail },
-  });
+  const suppressed = await db.suppressionEntries.findByField('email', emailMessage.recipientEmail);
 
-  if (suppressed || emailMessage.lead.doNotContact || emailMessage.lead.unsubscribed || emailMessage.lead.bounced) {
-    await prisma.emailMessage.update({
-      where: { id: emailMessageId },
-      data: { status: 'failed', errorMessage: 'Recipient is suppressed or on do-not-contact list' },
-    });
+  if (suppressed || lead?.doNotContact || lead?.unsubscribed || lead?.bounced) {
+    await db.emailMessages.update(emailMessageId, { status: 'failed', errorMessage: 'Recipient is suppressed or on do-not-contact list' });
     if (campaignId) {
-      await prisma.campaignLead.updateMany({
-        where: { campaignId, leadId: emailMessage.leadId },
-        data: { status: 'skipped' },
-      });
+      const cl = await db.campaignLeads.findFirst({ campaignId, leadId: emailMessage.leadId as string });
+      if (cl) await db.campaignLeads.update(cl.id, { status: 'skipped' });
     }
     return { status: 'skipped', reason: 'suppressed' };
   }
@@ -552,59 +472,43 @@ async function processCampaignSend(job: Job) {
   const apiKey = await getApiKey('brevo');
   const emailProvider = createEmailProvider('brevo', apiKey);
 
-  await prisma.emailMessage.update({
-    where: { id: emailMessageId },
-    data: { status: 'sending' },
-  });
+  await db.emailMessages.update(emailMessageId, { status: 'sending' });
 
   const sendResult = await emailProvider.sendEmail({
     to: {
-      email: emailMessage.recipientEmail,
-      name: emailMessage.recipientName || undefined,
+      email: emailMessage.recipientEmail as string,
+      name: (emailMessage.recipientName as string) || undefined,
     },
     from: {
-      email: emailMessage.senderEmail || emailMessage.campaign?.senderEmail || '',
-      name: emailMessage.senderName || emailMessage.campaign?.senderName || undefined,
+      email: (emailMessage.senderEmail as string) || (campaign?.senderEmail as string) || '',
+      name: (emailMessage.senderName as string) || (campaign?.senderName as string) || undefined,
     },
-    replyTo: emailMessage.campaign?.replyToEmail
-      ? { email: emailMessage.campaign.replyToEmail }
-      : undefined,
-    subject: emailMessage.subject || '',
-    htmlContent: emailMessage.htmlBody || '',
-    textContent: emailMessage.textBody || undefined,
+    replyTo: campaign?.replyToEmail ? { email: campaign.replyToEmail as string } : undefined,
+    subject: (emailMessage.subject as string) || '',
+    htmlContent: (emailMessage.htmlBody as string) || '',
+    textContent: (emailMessage.textBody as string) || undefined,
     tags: campaignId ? [`campaign-${campaignId}`] : undefined,
   });
 
   if (sendResult.status === 'sent' || sendResult.status === 'queued') {
-    await prisma.emailMessage.update({
-      where: { id: emailMessageId },
-      data: {
-        status: 'sent',
-        provider: 'brevo',
-        providerMessageId: sendResult.messageId,
-        sentAt: new Date(),
-      },
+    await db.emailMessages.update(emailMessageId, {
+      status: 'sent',
+      provider: 'brevo',
+      providerMessageId: sendResult.messageId,
+      sentAt: new Date(),
     });
 
-    await prisma.lead.update({
-      where: { id: emailMessage.leadId },
-      data: { outreachStatus: 'sent' },
-    });
+    await db.leads.update(emailMessage.leadId as string, { outreachStatus: 'sent' });
 
     if (campaignId) {
-      await prisma.campaignLead.updateMany({
-        where: { campaignId, leadId: emailMessage.leadId },
-        data: { status: 'sent' },
-      });
-      await prisma.campaign.update({
-        where: { id: campaignId },
-        data: { emailsSent: { increment: 1 } },
-      });
+      const cl = await db.campaignLeads.findFirst({ campaignId, leadId: emailMessage.leadId as string });
+      if (cl) await db.campaignLeads.update(cl.id, { status: 'sent' });
+      await db.campaigns.increment(campaignId, 'emailsSent', 1);
     }
 
     await createActivity({
       eventType: 'email.sent',
-      leadId: emailMessage.leadId,
+      leadId: emailMessage.leadId as string,
       campaignId: campaignId || undefined,
       emailMessageId,
       provider: 'brevo',
@@ -613,19 +517,14 @@ async function processCampaignSend(job: Job) {
 
     return { status: 'sent', messageId: sendResult.messageId };
   } else {
-    await prisma.emailMessage.update({
-      where: { id: emailMessageId },
-      data: {
-        status: 'failed',
-        errorMessage: sendResult.error || 'Send failed',
-      },
+    await db.emailMessages.update(emailMessageId, {
+      status: 'failed',
+      errorMessage: sendResult.error || 'Send failed',
     });
 
     if (campaignId) {
-      await prisma.campaignLead.updateMany({
-        where: { campaignId, leadId: emailMessage.leadId },
-        data: { status: 'failed' },
-      });
+      const cl = await db.campaignLeads.findFirst({ campaignId, leadId: emailMessage.leadId as string });
+      if (cl) await db.campaignLeads.update(cl.id, { status: 'failed' });
     }
 
     throw new Error(sendResult.error || 'Email send failed');
@@ -640,32 +539,25 @@ async function processWebhook(job: Job) {
   logger.info('Processing webhook', { provider, eventType, webhookEventId });
 
   if (provider === 'brevo') {
-    await processBrevoWebhookEvent(eventType, payload, webhookEventId);
+    await processBrevoWebhookEvent(eventType, payload);
   }
 
-  // Mark webhook event as processed
   if (webhookEventId) {
-    await prisma.webhookEvent.update({
-      where: { id: webhookEventId },
-      data: { status: 'processed', processedAt: new Date() },
-    });
+    await db.webhookEvents.update(webhookEventId, { status: 'processed', processedAt: new Date() });
   }
 }
 
 async function processBrevoWebhookEvent(
   eventType: string,
-  payload: Record<string, unknown>,
-  webhookEventId?: string
+  payload: Record<string, unknown>
 ) {
-  const messageId = payload['message-id'] as string || payload.messageId as string;
+  const messageId = (payload['message-id'] as string) || (payload.messageId as string);
   if (!messageId) {
     logger.warn('Brevo webhook missing message-id', { eventType, payload });
     return;
   }
 
-  const emailMessage = await prisma.emailMessage.findFirst({
-    where: { providerMessageId: messageId },
-  });
+  const emailMessage = await db.emailMessages.findFirst({ providerMessageId: messageId });
 
   if (!emailMessage) {
     logger.warn('Email message not found for Brevo webhook', { messageId, eventType });
@@ -673,15 +565,15 @@ async function processBrevoWebhookEvent(
   }
 
   const now = new Date();
-  const eventMap: Record<string, { status: string; field: string; activityType: string }> = {
-    delivered: { status: 'delivered', field: 'deliveredAt', activityType: 'email.delivered' },
-    opened: { status: 'delivered', field: 'openedAt', activityType: 'email.opened' },
-    click: { status: 'delivered', field: 'clickedAt', activityType: 'email.clicked' },
-    hard_bounce: { status: 'failed', field: 'bouncedAt', activityType: 'email.bounced' },
-    soft_bounce: { status: 'failed', field: 'bouncedAt', activityType: 'email.bounced' },
-    spam: { status: 'failed', field: 'bouncedAt', activityType: 'email.bounced' },
-    unsubscribed: { status: 'delivered', field: 'unsubscribedAt', activityType: 'email.unsubscribed' },
-    reply: { status: 'delivered', field: 'repliedAt', activityType: 'email.replied' },
+  const eventMap: Record<string, { field: string; activityType: string }> = {
+    delivered: { field: 'deliveredAt', activityType: 'email.delivered' },
+    opened: { field: 'openedAt', activityType: 'email.opened' },
+    click: { field: 'clickedAt', activityType: 'email.clicked' },
+    hard_bounce: { field: 'bouncedAt', activityType: 'email.bounced' },
+    soft_bounce: { field: 'bouncedAt', activityType: 'email.bounced' },
+    spam: { field: 'bouncedAt', activityType: 'email.bounced' },
+    unsubscribed: { field: 'unsubscribedAt', activityType: 'email.unsubscribed' },
+    reply: { field: 'repliedAt', activityType: 'email.replied' },
   };
 
   const mapping = eventMap[eventType];
@@ -690,38 +582,25 @@ async function processBrevoWebhookEvent(
     return;
   }
 
-  // Create email event (idempotent via unique constraint)
   const providerEventId = `${messageId}-${eventType}-${payload.ts || Date.now()}`;
   try {
-    await prisma.emailEvent.create({
-      data: {
-        emailMessageId: emailMessage.id,
-        eventType,
-        provider: 'brevo',
-        providerEventId,
-        metadata: payload as object,
-        occurredAt: payload.ts ? new Date(Number(payload.ts) * 1000) : now,
-      },
+    await db.emailEvents.create({
+      emailMessageId: emailMessage.id,
+      eventType,
+      provider: 'brevo',
+      providerEventId,
+      metadata: payload,
+      occurredAt: payload.ts ? new Date(Number(payload.ts) * 1000) : now,
     });
-  } catch (error) {
-    // Duplicate event, skip
-    if ((error as { code?: string }).code === 'P2002') {
-      logger.debug('Duplicate email event skipped', { providerEventId });
-      return;
-    }
-    throw error;
+  } catch {
+    logger.debug('Duplicate email event skipped', { providerEventId });
+    return;
   }
 
-  // Update email message
   const updates: Record<string, unknown> = {};
   updates[mapping.field] = now;
+  await db.emailMessages.update(emailMessage.id, updates);
 
-  await prisma.emailMessage.update({
-    where: { id: emailMessage.id },
-    data: updates,
-  });
-
-  // Update lead outreach status
   const outreachStatusMap: Record<string, string> = {
     delivered: 'delivered',
     opened: 'opened',
@@ -729,55 +608,33 @@ async function processBrevoWebhookEvent(
   };
 
   if (outreachStatusMap[eventType]) {
-    await prisma.lead.update({
-      where: { id: emailMessage.leadId },
-      data: { outreachStatus: outreachStatusMap[eventType] },
-    });
+    await db.leads.update(emailMessage.leadId as string, { outreachStatus: outreachStatusMap[eventType] });
   }
 
-  // Handle bounces - add to suppression list
   if (eventType === 'hard_bounce' || eventType === 'spam') {
-    const recipientEmail = emailMessage.recipientEmail;
+    const recipientEmail = emailMessage.recipientEmail as string;
     if (recipientEmail) {
-      await prisma.suppressionEntry.upsert({
-        where: { email: recipientEmail },
-        update: {},
-        create: {
-          email: recipientEmail,
-          reason: eventType === 'hard_bounce' ? 'bounced' : 'complained',
-          source: 'brevo_webhook',
-        },
+      await db.suppressionEntries.upsert('email', recipientEmail, {}, {
+        email: recipientEmail,
+        reason: eventType === 'hard_bounce' ? 'bounced' : 'complained',
+        source: 'brevo_webhook',
       });
-
-      await prisma.lead.update({
-        where: { id: emailMessage.leadId },
-        data: { bounced: true, outreachStatus: 'bounced' },
-      });
+      await db.leads.update(emailMessage.leadId as string, { bounced: true, outreachStatus: 'bounced' });
     }
   }
 
-  // Handle unsubscribes
   if (eventType === 'unsubscribed') {
-    const recipientEmail = emailMessage.recipientEmail;
+    const recipientEmail = emailMessage.recipientEmail as string;
     if (recipientEmail) {
-      await prisma.suppressionEntry.upsert({
-        where: { email: recipientEmail },
-        update: {},
-        create: {
-          email: recipientEmail,
-          reason: 'unsubscribed',
-          source: 'brevo_webhook',
-        },
+      await db.suppressionEntries.upsert('email', recipientEmail, {}, {
+        email: recipientEmail,
+        reason: 'unsubscribed',
+        source: 'brevo_webhook',
       });
-
-      await prisma.lead.update({
-        where: { id: emailMessage.leadId },
-        data: { unsubscribed: true },
-      });
+      await db.leads.update(emailMessage.leadId as string, { unsubscribed: true });
     }
   }
 
-  // Update campaign stats
   if (emailMessage.campaignId) {
     const campaignStatsField: Record<string, string> = {
       delivered: 'emailsDelivered',
@@ -789,17 +646,14 @@ async function processBrevoWebhookEvent(
     };
     const field = campaignStatsField[eventType];
     if (field) {
-      await prisma.campaign.update({
-        where: { id: emailMessage.campaignId },
-        data: { [field]: { increment: 1 } },
-      });
+      await db.campaigns.increment(emailMessage.campaignId as string, field, 1);
     }
   }
 
   await createActivity({
     eventType: mapping.activityType as Parameters<typeof createActivity>[0]['eventType'],
-    leadId: emailMessage.leadId,
-    campaignId: emailMessage.campaignId || undefined,
+    leadId: emailMessage.leadId as string,
+    campaignId: (emailMessage.campaignId as string) || undefined,
     emailMessageId: emailMessage.id,
     provider: 'brevo',
     providerEventId,
@@ -837,7 +691,7 @@ function createWorkers() {
     concurrency: 5,
     limiter: {
       max: 50,
-      duration: 60000, // 50 per minute max
+      duration: 60000,
     },
   });
 
@@ -895,7 +749,6 @@ async function shutdown(signal: string) {
 
   await Promise.allSettled(closePromises);
   await closeAllQueues();
-  await prisma.$disconnect();
 
   logger.info('All workers shut down');
   process.exit(0);

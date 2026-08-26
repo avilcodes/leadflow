@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 
 export async function GET(request: NextRequest) {
@@ -12,25 +12,25 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        isActive: true,
-        lastLoginAt: true,
-        createdAt: true,
-      },
-    });
+    const fullUser = await db.users.findById(session.userId);
 
-    if (!user || !user.isActive) {
+    if (!fullUser || !fullUser.isActive) {
       return NextResponse.json(
         { success: false, error: 'User not found or deactivated' },
         { status: 401 }
       );
     }
+
+    // Select only the fields we need
+    const user = {
+      id: fullUser.id,
+      email: fullUser.email,
+      name: fullUser.name,
+      role: fullUser.role,
+      isActive: fullUser.isActive,
+      lastLoginAt: fullUser.lastLoginAt,
+      createdAt: fullUser.createdAt,
+    };
 
     return NextResponse.json({
       success: true,

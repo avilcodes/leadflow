@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { getLeadSourceProvider } from '@/providers/lead-sources';
 import { getEnrichmentProvider } from '@/providers/enrichment';
@@ -52,13 +52,13 @@ export async function POST(
       result = { success: false, message: err instanceof Error ? err.message : 'Connection failed' };
     }
 
-    await prisma.apiCredential.updateMany({
-      where: { provider },
-      data: {
+    await db.apiCredentials.updateMany(
+      { provider },
+      {
         lastTestedAt: new Date(),
         testStatus: result.success ? 'connected' : 'failed',
-      },
-    });
+      }
+    );
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {

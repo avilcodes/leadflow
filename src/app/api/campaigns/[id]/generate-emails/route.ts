@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { getAIProvider } from '@/providers/ai';
@@ -16,35 +16,34 @@ export async function POST(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({
-      where: { id },
-      include: {
-        campaignLeads: {
-          where: { status: 'pending' },
-          include: {
-            lead: {
-              include: {
-                aiAnalyses: { where: { status: 'completed' }, orderBy: { createdAt: 'desc' }, take: 1 },
-              },
-            },
-          },
-        },
-      },
-    });
+    const campaign = await db.campaigns.findById(id);
 
     if (!campaign) {
       return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 });
     }
 
-    const model = campaign.aiModel || process.env.OPENROUTER_DEFAULT_MODEL || 'anthropic/claude-sonnet-4';
+    // Get pending campaign leads
+    const campaignLeads = await db.campaignLeads.findMany({
+      where: { campaignId: id, status: 'pending' },
+    });
+
+    const model = (campaign.aiModel as string) || process.env.OPENROUTER_DEFAULT_MODEL || 'anthropic/claude-sonnet-4';
     const aiProvider = getAIProvider();
     let generated = 0;
     let failed = 0;
     const errors: string[] = [];
 
-    for (const cl of campaign.campaignLeads) {
-      const lead = cl.lead;
-      const analysis = lead.aiAnalyses[0];
+    for (const cl of campaignLeads) {
+      const lead = await db.leads.findById(cl.leadId as string);
+      if (!lead) { failed++; continue; }
+
+      // Get latest completed analysis
+      const analyses = await db.aiAnalyses.findMany({
+        where: { leadId: lead.id, status: 'completed' },
+        orderBy: { field: 'createdAt', direction: 'desc' },
+        limit: 1,
+      });
+      const analysis = analyses[0];
 
       if (!analysis) {
         errors.push(`${lead.fullName || lead.email}: No AI analysis`);
@@ -53,70 +52,68 @@ export async function POST(
       }
 
       if (lead.doNotContact || lead.unsubscribed || lead.bounced) {
-        await prisma.campaignLead.update({ where: { id: cl.id }, data: { status: 'skipped' } });
+        await db.campaignLeads.update(cl.id, { status: 'skipped' });
         continue;
       }
 
       try {
         const result = await aiProvider.generateEmail({
           leadData: {
-            firstName: lead.firstName ?? undefined,
-            lastName: lead.lastName ?? undefined,
-            fullName: lead.fullName ?? undefined,
-            jobTitle: lead.jobTitle ?? undefined,
-            email: lead.email ?? undefined,
-            companyName: lead.companyName ?? undefined,
-            industry: lead.industry ?? undefined,
-            location: lead.location ?? undefined,
-            website: lead.website ?? undefined,
+            firstName: (lead.firstName as string) ?? undefined,
+            lastName: (lead.lastName as string) ?? undefined,
+            fullName: (lead.fullName as string) ?? undefined,
+            jobTitle: (lead.jobTitle as string) ?? undefined,
+            email: (lead.email as string) ?? undefined,
+            companyName: (lead.companyName as string) ?? undefined,
+            industry: (lead.industry as string) ?? undefined,
+            location: (lead.location as string) ?? undefined,
+            website: (lead.website as string) ?? undefined,
           },
           analysis: {
-            personSummary: analysis.personSummary || '',
-            companySummary: analysis.companySummary || '',
-            currentContext: analysis.currentContext || '',
+            personSummary: (analysis.personSummary as string) || '',
+            companySummary: (analysis.companySummary as string) || '',
+            currentContext: (analysis.currentContext as string) || '',
             signals: (analysis.signals as string[]) || [],
             painPoints: (analysis.painPoints as string[]) || [],
             priorities: (analysis.priorities as string[]) || [],
             personalizations: (analysis.personalizations as string[]) || [],
-            outreachAngle: analysis.outreachAngle || '',
+            outreachAngle: (analysis.outreachAngle as string) || '',
             relevanceReasons: (analysis.relevanceReasons as string[]) || [],
-            confidenceScore: analysis.confidenceScore || 0,
+            confidenceScore: (analysis.confidenceScore as number) || 0,
             rawResponse: {},
-            model: analysis.model,
+            model: analysis.model as string,
           },
           campaignConfig: {
-            objective: campaign.objective || undefined,
-            targetAudience: campaign.targetAudience || undefined,
-            productDescription: campaign.productDescription || undefined,
-            valueProposition: campaign.valueProposition || undefined,
-            tone: campaign.tone || undefined,
-            emailLength: campaign.emailLength || undefined,
-            cta: campaign.cta || undefined,
-            customInstructions: campaign.customInstructions || undefined,
-            senderName: campaign.senderName || undefined,
+            objective: (campaign.objective as string) || undefined,
+            targetAudience: (campaign.targetAudience as string) || undefined,
+            productDescription: (campaign.productDescription as string) || undefined,
+            valueProposition: (campaign.valueProposition as string) || undefined,
+            tone: (campaign.tone as string) || undefined,
+            emailLength: (campaign.emailLength as string) || undefined,
+            cta: (campaign.cta as string) || undefined,
+            customInstructions: (campaign.customInstructions as string) || undefined,
+            senderName: (campaign.senderName as string) || undefined,
           },
         });
 
-        await prisma.emailMessage.create({
-          data: {
-            leadId: lead.id,
-            campaignId: campaign.id,
-            subject: result.subject,
-            htmlBody: result.htmlBody,
-            textBody: result.textBody,
-            aiModel: model,
-            aiPrompt: { campaign: campaign.id } as object,
-            aiRawResponse: result.rawResponse as object,
-            status: campaign.autoApprove ? 'approved' : 'generated',
-            recipientEmail: lead.email,
-            recipientName: lead.fullName,
-            senderName: campaign.senderName,
-            senderEmail: campaign.senderEmail,
-            approvedAt: campaign.autoApprove ? new Date() : undefined,
-          },
+        await db.emailMessages.create({
+          leadId: lead.id,
+          campaignId: campaign.id,
+          subject: result.subject,
+          htmlBody: result.htmlBody,
+          textBody: result.textBody,
+          aiModel: model,
+          aiPrompt: { campaign: campaign.id },
+          aiRawResponse: result.rawResponse,
+          status: campaign.autoApprove ? 'approved' : 'generated',
+          recipientEmail: lead.email,
+          recipientName: lead.fullName,
+          senderName: campaign.senderName,
+          senderEmail: campaign.senderEmail,
+          approvedAt: campaign.autoApprove ? new Date() : undefined,
         });
 
-        await prisma.campaignLead.update({ where: { id: cl.id }, data: { status: 'email_generated' } });
+        await db.campaignLeads.update(cl.id, { status: 'email_generated' });
         await createActivity({ eventType: 'email.generated', leadId: lead.id, campaignId: campaign.id, userId: session.userId });
         generated++;
       } catch (err) {
@@ -126,10 +123,9 @@ export async function POST(
       }
     }
 
-    await prisma.campaign.update({
-      where: { id },
-      data: { emailsGenerated: { increment: generated } },
-    });
+    if (generated > 0) {
+      await db.campaigns.increment(id, 'emailsGenerated', generated);
+    }
 
     return NextResponse.json({
       success: true,

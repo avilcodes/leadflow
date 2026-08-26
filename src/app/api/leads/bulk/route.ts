@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import logger from '@/lib/logger';
@@ -30,12 +30,14 @@ export async function POST(request: NextRequest) {
 
     switch (action) {
       case 'delete': {
-        const result = await prisma.lead.updateMany({
-          where: { id: { in: leadIds }, deletedAt: null },
-          data: { deletedAt: new Date() },
-        });
-        processed = result.count;
         for (const leadId of leadIds) {
+          try {
+            const lead = await db.leads.findById(leadId);
+            if (lead && !lead.deletedAt) {
+              await db.leads.update(leadId, { deletedAt: new Date() });
+              processed++;
+            }
+          } catch { failed++; }
           await createActivity({ eventType: 'lead.deleted', leadId, userId: session.userId });
         }
         break;
@@ -46,12 +48,14 @@ export async function POST(request: NextRequest) {
         if (!status) {
           return NextResponse.json({ success: false, error: 'status param required' }, { status: 400 });
         }
-        const result = await prisma.lead.updateMany({
-          where: { id: { in: leadIds }, deletedAt: null },
-          data: { status },
-        });
-        processed = result.count;
         for (const leadId of leadIds) {
+          try {
+            const lead = await db.leads.findById(leadId);
+            if (lead && !lead.deletedAt) {
+              await db.leads.update(leadId, { status });
+              processed++;
+            }
+          } catch { failed++; }
           await createActivity({ eventType: 'lead.updated', leadId, userId: session.userId, metadata: { status } });
         }
         break;
@@ -62,14 +66,10 @@ export async function POST(request: NextRequest) {
         if (!tagName) {
           return NextResponse.json({ success: false, error: 'tag param required' }, { status: 400 });
         }
-        const tag = await prisma.tag.upsert({
-          where: { name: tagName },
-          update: {},
-          create: { name: tagName },
-        });
+        const tag = await db.tags.upsert('name', tagName, {}, { name: tagName });
         for (const leadId of leadIds) {
           try {
-            await prisma.leadTag.create({ data: { leadId, tagId: tag.id } });
+            await db.leadTags.create({ leadId, tagId: tag.id });
             processed++;
           } catch {
             // duplicate tag, skip
@@ -81,11 +81,10 @@ export async function POST(request: NextRequest) {
       case 'enrich':
       case 'analyze':
       case 'generate-email': {
-        // These are queued operations - mark as pending
         for (const leadId of leadIds) {
           try {
             if (action === 'enrich') {
-              await prisma.lead.update({ where: { id: leadId }, data: { enrichmentStatus: 'in_progress' } });
+              await db.leads.update(leadId, { enrichmentStatus: 'in_progress' });
               await createActivity({ eventType: 'lead.enrichment.started', leadId, userId: session.userId });
             } else if (action === 'analyze') {
               await createActivity({ eventType: 'lead.ai_analysis.started', leadId, userId: session.userId });

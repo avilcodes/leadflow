@@ -9,14 +9,13 @@
     },
     "ghcr.io/devcontainers/features/git:1": {}
   },
-  "forwardPorts": [3000, 5432, 6379],
-  "postCreateCommand": "npm install && npx prisma generate && npx prisma db push && npm run db:seed",
+  "forwardPorts": [3000, 6379],
+  "postCreateCommand": "npm install",
   "customizations": {
     "vscode": {
       "extensions": [
         "dbaeumer.vscode-eslint",
         "esbenp.prettier-vscode",
-        "prisma.prisma",
         "bradlc.vscode-tailwindcss",
         "ms-vscode.vscode-typescript-next"
       ],
@@ -28,7 +27,9 @@
     }
   },
   "remoteEnv": {
-    "DATABASE_URL": "postgresql://leadflow:leadflow@db:5432/leadflow",
+    "FIREBASE_PROJECT_ID": "${localEnv:FIREBASE_PROJECT_ID}",
+    "FIREBASE_CLIENT_EMAIL": "${localEnv:FIREBASE_CLIENT_EMAIL}",
+    "FIREBASE_PRIVATE_KEY": "${localEnv:FIREBASE_PRIVATE_KEY}",
     "REDIS_URL": "redis://redis:6379",
     "AUTH_SECRET": "dev-secret-change-in-production-32chars",
     "NEXTAUTH_URL": "http://localhost:3000",

@@ -16,26 +16,12 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
-      - run: npx prisma generate
       - run: npm run lint
       - run: npm run type-check
 
   test:
     runs-on: ubuntu-latest
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: leadflow
-          POSTGRES_PASSWORD: leadflow
-          POSTGRES_DB: leadflow_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
       redis:
         image: redis:7-alpine
         ports:
@@ -46,7 +32,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://leadflow:leadflow@localhost:5432/leadflow_test
+      FIREBASE_PROJECT_ID: leadflow-test
       REDIS_URL: redis://localhost:6379
       AUTH_SECRET: test-secret-for-ci-only-32-chars!!
       NODE_ENV: test
@@ -57,15 +43,13 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
-      - run: npx prisma generate
-      - run: npx prisma db push
       - run: npm test
 
   build:
     runs-on: ubuntu-latest
     needs: [lint-and-typecheck]
     env:
-      DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+      FIREBASE_PROJECT_ID: leadflow-build
       AUTH_SECRET: build-secret-for-ci-only-32-chars
     steps:
       - uses: actions/checkout@v4
@@ -74,5 +58,4 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
-      - run: npx prisma generate
       - run: npm run build

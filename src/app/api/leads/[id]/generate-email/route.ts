@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getLeadWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { getAIProvider } from '@/providers/ai';
@@ -16,14 +16,11 @@ export async function POST(
     }
 
     const { id } = await params;
-    const lead = await prisma.lead.findUnique({
-      where: { id, deletedAt: null },
-      include: {
-        aiAnalyses: { where: { status: 'completed' }, orderBy: { createdAt: 'desc' }, take: 1 },
-      },
+    const lead = await getLeadWithRelations(id, {
+      aiAnalyses: { limit: 1, where: { status: 'completed' } },
     });
 
-    if (!lead) {
+    if (!lead || lead.deletedAt) {
       return NextResponse.json({ success: false, error: 'Lead not found' }, { status: 404 });
     }
 
@@ -46,7 +43,8 @@ export async function POST(
     };
 
     const model = body.model || process.env.OPENROUTER_DEFAULT_MODEL || 'anthropic/claude-sonnet-4';
-    const analysis = lead.aiAnalyses[0];
+    const analyses = (lead.aiAnalyses as Array<Record<string, unknown>>) || [];
+    const analysis = analyses[0];
 
     if (!analysis) {
       return NextResponse.json({ success: false, error: 'Lead has no AI analysis. Run analysis first.' }, { status: 400 });
@@ -55,53 +53,51 @@ export async function POST(
     const aiProvider = getAIProvider();
     const result = await aiProvider.generateEmail({
       leadData: {
-        firstName: lead.firstName ?? undefined,
-        lastName: lead.lastName ?? undefined,
-        fullName: lead.fullName ?? undefined,
-        jobTitle: lead.jobTitle ?? undefined,
-        email: lead.email ?? undefined,
-        companyName: lead.companyName ?? undefined,
-        companyDomain: lead.companyDomain ?? undefined,
-        industry: lead.industry ?? undefined,
-        location: lead.location ?? undefined,
-        website: lead.website ?? undefined,
+        firstName: (lead.firstName as string) ?? undefined,
+        lastName: (lead.lastName as string) ?? undefined,
+        fullName: (lead.fullName as string) ?? undefined,
+        jobTitle: (lead.jobTitle as string) ?? undefined,
+        email: (lead.email as string) ?? undefined,
+        companyName: (lead.companyName as string) ?? undefined,
+        companyDomain: (lead.companyDomain as string) ?? undefined,
+        industry: (lead.industry as string) ?? undefined,
+        location: (lead.location as string) ?? undefined,
+        website: (lead.website as string) ?? undefined,
       },
       analysis: {
-        personSummary: analysis.personSummary || '',
-        companySummary: analysis.companySummary || '',
-        currentContext: analysis.currentContext || '',
+        personSummary: (analysis.personSummary as string) || '',
+        companySummary: (analysis.companySummary as string) || '',
+        currentContext: (analysis.currentContext as string) || '',
         signals: (analysis.signals as string[]) || [],
         painPoints: (analysis.painPoints as string[]) || [],
         priorities: (analysis.priorities as string[]) || [],
         personalizations: (analysis.personalizations as string[]) || [],
-        outreachAngle: analysis.outreachAngle || '',
+        outreachAngle: (analysis.outreachAngle as string) || '',
         relevanceReasons: (analysis.relevanceReasons as string[]) || [],
-        confidenceScore: analysis.confidenceScore || 0,
+        confidenceScore: (analysis.confidenceScore as number) || 0,
         rawResponse: {},
-        model: analysis.model,
+        model: analysis.model as string,
       },
       campaignConfig,
     });
 
-    const email = await prisma.emailMessage.create({
-      data: {
-        leadId: lead.id,
-        campaignId: body.campaignId || null,
-        subject: result.subject,
-        htmlBody: result.htmlBody,
-        textBody: result.textBody,
-        aiModel: model,
-        aiPrompt: campaignConfig,
-        aiRawResponse: result.rawResponse as object,
-        status: 'generated',
-        recipientEmail: lead.email,
-        recipientName: lead.fullName,
-        senderName: campaignConfig.senderName || null,
-        senderEmail: body.senderEmail || null,
-      },
+    const email = await db.emailMessages.create({
+      leadId: lead.id,
+      campaignId: body.campaignId || null,
+      subject: result.subject,
+      htmlBody: result.htmlBody,
+      textBody: result.textBody,
+      aiModel: model,
+      aiPrompt: campaignConfig,
+      aiRawResponse: result.rawResponse,
+      status: 'generated',
+      recipientEmail: lead.email,
+      recipientName: lead.fullName,
+      senderName: campaignConfig.senderName || null,
+      senderEmail: body.senderEmail || null,
     });
 
-    await prisma.lead.update({ where: { id: lead.id }, data: { outreachStatus: 'draft' } });
+    await db.leads.update(lead.id, { outreachStatus: 'draft' });
     await createActivity({ eventType: 'email.generated', leadId: lead.id, emailMessageId: email.id, userId: session.userId, metadata: { model, subject: result.subject } });
 
     return NextResponse.json({ success: true, data: email }, { status: 201 });

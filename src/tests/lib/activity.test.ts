@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mockPrismaClient } from '../setup';
+import { mockDb } from '../setup';
 import { createActivity } from '@/lib/activity';
 
 describe('Activity System', () => {
@@ -17,8 +17,8 @@ describe('Activity System', () => {
         createdAt: new Date(),
       };
 
-      mockPrismaClient.activity.findFirst.mockResolvedValue(null);
-      mockPrismaClient.activity.create.mockResolvedValue(mockActivity);
+      mockDb.activities.findFirst.mockResolvedValue(null);
+      mockDb.activities.create.mockResolvedValue(mockActivity);
 
       const result = await createActivity({
         eventType: 'lead.created',
@@ -29,13 +29,13 @@ describe('Activity System', () => {
       expect(result).not.toBeNull();
       expect(result!.id).toBe('act-1');
       expect(result!.eventType).toBe('lead.created');
-      expect(mockPrismaClient.activity.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
+      expect(mockDb.activities.create).toHaveBeenCalledWith(
+        expect.objectContaining({
           eventType: 'lead.created',
           leadId: 'lead-1',
           userId: 'user-1',
         }),
-      });
+      );
     });
 
     it('creates activity with all optional fields', async () => {
@@ -52,8 +52,8 @@ describe('Activity System', () => {
         createdAt: new Date(),
       };
 
-      mockPrismaClient.activity.findFirst.mockResolvedValue(null);
-      mockPrismaClient.activity.create.mockResolvedValue(mockActivity);
+      mockDb.activities.findFirst.mockResolvedValue(null);
+      mockDb.activities.create.mockResolvedValue(mockActivity);
 
       const result = await createActivity({
         eventType: 'email.sent',
@@ -77,7 +77,7 @@ describe('Activity System', () => {
         createdAt: new Date(),
       };
 
-      mockPrismaClient.activity.create.mockResolvedValue(mockActivity);
+      mockDb.activities.create.mockResolvedValue(mockActivity);
 
       const result = await createActivity({
         eventType: 'campaign.created',
@@ -97,7 +97,7 @@ describe('Activity System', () => {
         createdAt: new Date(),
       };
 
-      mockPrismaClient.activity.findFirst.mockResolvedValue(existingActivity);
+      mockDb.activities.findFirst.mockResolvedValue(existingActivity);
 
       const result = await createActivity({
         eventType: 'email.delivered',
@@ -107,12 +107,12 @@ describe('Activity System', () => {
 
       expect(result).not.toBeNull();
       expect(result!.id).toBe('act-existing');
-      expect(mockPrismaClient.activity.create).not.toHaveBeenCalled();
+      expect(mockDb.activities.create).not.toHaveBeenCalled();
     });
 
     it('checks for duplicate with correct query', async () => {
-      mockPrismaClient.activity.findFirst.mockResolvedValue(null);
-      mockPrismaClient.activity.create.mockResolvedValue({
+      mockDb.activities.findFirst.mockResolvedValue(null);
+      mockDb.activities.create.mockResolvedValue({
         id: 'act-new',
         eventType: 'email.opened',
         providerEventId: 'brevo-evt-789',
@@ -123,16 +123,14 @@ describe('Activity System', () => {
         providerEventId: 'brevo-evt-789',
       });
 
-      expect(mockPrismaClient.activity.findFirst).toHaveBeenCalledWith({
-        where: {
-          providerEventId: 'brevo-evt-789',
-          eventType: 'email.opened',
-        },
+      expect(mockDb.activities.findFirst).toHaveBeenCalledWith({
+        providerEventId: 'brevo-evt-789',
+        eventType: 'email.opened',
       });
     });
 
     it('does not check for duplicates when no providerEventId', async () => {
-      mockPrismaClient.activity.create.mockResolvedValue({
+      mockDb.activities.create.mockResolvedValue({
         id: 'act-new',
         eventType: 'lead.created',
       });
@@ -142,13 +140,12 @@ describe('Activity System', () => {
         leadId: 'lead-1',
       });
 
-      expect(mockPrismaClient.activity.findFirst).not.toHaveBeenCalled();
+      expect(mockDb.activities.findFirst).not.toHaveBeenCalled();
     });
 
     it('allows same providerEventId with different eventTypes', async () => {
-      // First call - no duplicate found
-      mockPrismaClient.activity.findFirst.mockResolvedValueOnce(null);
-      mockPrismaClient.activity.create.mockResolvedValueOnce({
+      mockDb.activities.findFirst.mockResolvedValueOnce(null);
+      mockDb.activities.create.mockResolvedValueOnce({
         id: 'act-1',
         eventType: 'email.delivered',
         providerEventId: 'brevo-evt-100',
@@ -159,9 +156,8 @@ describe('Activity System', () => {
         providerEventId: 'brevo-evt-100',
       });
 
-      // Second call with different event type - no duplicate found
-      mockPrismaClient.activity.findFirst.mockResolvedValueOnce(null);
-      mockPrismaClient.activity.create.mockResolvedValueOnce({
+      mockDb.activities.findFirst.mockResolvedValueOnce(null);
+      mockDb.activities.create.mockResolvedValueOnce({
         id: 'act-2',
         eventType: 'email.opened',
         providerEventId: 'brevo-evt-100',
@@ -172,13 +168,13 @@ describe('Activity System', () => {
         providerEventId: 'brevo-evt-100',
       });
 
-      expect(mockPrismaClient.activity.create).toHaveBeenCalledTimes(2);
+      expect(mockDb.activities.create).toHaveBeenCalledTimes(2);
     });
   });
 
   describe('error handling', () => {
     it('returns null and does not throw on database error', async () => {
-      mockPrismaClient.activity.create.mockRejectedValue(
+      mockDb.activities.create.mockRejectedValue(
         new Error('Database connection failed')
       );
 
@@ -187,12 +183,11 @@ describe('Activity System', () => {
         leadId: 'lead-1',
       });
 
-      // createActivity should catch the error and return null
       expect(result).toBeNull();
     });
 
     it('returns null on findFirst error during idempotency check', async () => {
-      mockPrismaClient.activity.findFirst.mockRejectedValue(
+      mockDb.activities.findFirst.mockRejectedValue(
         new Error('Query timeout')
       );
 
@@ -205,11 +200,10 @@ describe('Activity System', () => {
     });
 
     it('does not propagate errors to caller', async () => {
-      mockPrismaClient.activity.create.mockRejectedValue(
+      mockDb.activities.create.mockRejectedValue(
         new Error('Constraint violation')
       );
 
-      // This should not throw
       const result = await createActivity({
         eventType: 'lead.updated',
       });
@@ -224,7 +218,7 @@ describe('Activity System', () => {
         errorInfo: { code: 'TIMEOUT', provider: 'apify' },
       };
 
-      mockPrismaClient.activity.create.mockResolvedValue(mockActivity);
+      mockDb.activities.create.mockResolvedValue(mockActivity);
 
       const result = await createActivity({
         eventType: 'lead.enrichment.failed',
@@ -233,11 +227,11 @@ describe('Activity System', () => {
       });
 
       expect(result).not.toBeNull();
-      expect(mockPrismaClient.activity.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
+      expect(mockDb.activities.create).toHaveBeenCalledWith(
+        expect.objectContaining({
           errorInfo: { code: 'TIMEOUT', provider: 'apify' },
         }),
-      });
+      );
     });
   });
 });

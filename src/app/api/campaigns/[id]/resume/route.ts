@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import logger from '@/lib/logger';
@@ -15,7 +15,7 @@ export async function POST(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    const campaign = await db.campaigns.findById(id);
     if (!campaign) {
       return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 });
     }
@@ -23,10 +23,7 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Only paused campaigns can be resumed' }, { status: 400 });
     }
 
-    const updated = await prisma.campaign.update({
-      where: { id },
-      data: { status: 'running', pausedAt: null },
-    });
+    const updated = await db.campaigns.update(id, { status: 'running', pausedAt: null });
 
     await createActivity({ eventType: 'campaign.resumed', campaignId: id, userId: session.userId });
 

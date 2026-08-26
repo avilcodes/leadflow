@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { updateCredentialSchema } from '@/lib/validation';
 import logger from '@/lib/logger';
@@ -16,24 +16,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
     }
 
-    const credentials = await prisma.apiCredential.findMany({
-      select: {
-        id: true,
-        provider: true,
-        encryptedKey: true,
-        config: true,
-        isActive: true,
-        lastTestedAt: true,
-        testStatus: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+    const credentials = await db.apiCredentials.findMany({});
 
     const masked = credentials.map(c => ({
-      ...c,
-      encryptedKey: undefined,
-      maskedKey: maskKey(c.encryptedKey),
+      id: c.id,
+      provider: c.provider,
+      config: c.config,
+      isActive: c.isActive,
+      lastTestedAt: c.lastTestedAt,
+      testStatus: c.testStatus,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      maskedKey: maskKey(c.encryptedKey as string),
       hasKey: true,
     }));
 
@@ -59,22 +53,23 @@ export async function POST(request: NextRequest) {
 
     const { provider, apiKey, config } = parsed.data;
 
-    const credential = await prisma.apiCredential.upsert({
-      where: { provider },
-      update: {
+    const credential = await db.apiCredentials.upsert(
+      'provider',
+      provider,
+      {
         encryptedKey: apiKey,
-        config: config ? (config as object) : undefined,
+        config: config || undefined,
         testStatus: 'untested',
-        updatedAt: new Date(),
       },
-      create: {
+      {
         provider,
         encryptedKey: apiKey,
-        config: config ? (config as object) : undefined,
+        config: config || undefined,
         testStatus: 'untested',
+        isActive: true,
         createdById: session.userId,
-      },
-    });
+      }
+    );
 
     return NextResponse.json({
       success: true,

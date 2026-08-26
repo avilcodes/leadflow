@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import logger from '@/lib/logger';
 import { z } from 'zod';
@@ -17,7 +17,7 @@ export async function POST(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    const campaign = await db.campaigns.findById(id);
     if (!campaign) {
       return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 });
     }
@@ -31,17 +31,20 @@ export async function POST(
     let added = 0;
     for (const leadId of parsed.data.leadIds) {
       try {
-        await prisma.campaignLead.create({ data: { campaignId: id, leadId } });
-        added++;
+        // Check if already exists
+        const existing = await db.campaignLeads.findFirst({ campaignId: id, leadId });
+        if (!existing) {
+          await db.campaignLeads.create({ campaignId: id, leadId, status: 'pending' });
+          added++;
+        }
       } catch {
         // duplicate, skip
       }
     }
 
-    await prisma.campaign.update({
-      where: { id },
-      data: { totalLeads: { increment: added } },
-    });
+    if (added > 0) {
+      await db.campaigns.increment(id, 'totalLeads', added);
+    }
 
     return NextResponse.json({ success: true, data: { added, total: parsed.data.leadIds.length } });
   } catch (error) {
@@ -67,16 +70,20 @@ export async function DELETE(
       return NextResponse.json({ success: false, error: parsed.error.errors[0].message }, { status: 400 });
     }
 
-    const result = await prisma.campaignLead.deleteMany({
-      where: { campaignId: id, leadId: { in: parsed.data.leadIds } },
-    });
+    let removed = 0;
+    for (const leadId of parsed.data.leadIds) {
+      const cl = await db.campaignLeads.findFirst({ campaignId: id, leadId });
+      if (cl) {
+        await db.campaignLeads.delete(cl.id);
+        removed++;
+      }
+    }
 
-    await prisma.campaign.update({
-      where: { id },
-      data: { totalLeads: { decrement: result.count } },
-    });
+    if (removed > 0) {
+      await db.campaigns.increment(id, 'totalLeads', -removed);
+    }
 
-    return NextResponse.json({ success: true, data: { removed: result.count } });
+    return NextResponse.json({ success: true, data: { removed } });
   } catch (error) {
     logger.error('DELETE /api/campaigns/[id]/leads failed', { error });
     return NextResponse.json({ success: false, error: 'Internal server error' }, { status: 500 });

@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
       bodySizeLimit: '10mb',
     },
   },
-  serverExternalPackages: ['bullmq', 'ioredis', 'winston', 'bcryptjs'],
+  serverExternalPackages: ['bullmq', 'ioredis', 'winston', 'bcryptjs', 'firebase-admin'],
 };
 
 export default nextConfig;

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getLeadWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { createActivity } from '@/lib/activity';
 import { updateLeadSchema } from '@/lib/validation';
@@ -19,34 +19,15 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     const { id } = await context.params;
 
-    const lead = await prisma.lead.findUnique({
-      where: { id },
-      include: {
-        company: true,
-        leadTags: { include: { tag: true } },
-        enrichmentJobs: {
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-        },
-        aiAnalyses: {
-          orderBy: { createdAt: 'desc' },
-          take: 5,
-        },
-        emailMessages: {
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-        },
-        campaignLeads: {
-          include: { campaign: { select: { id: true, name: true, status: true } } },
-        },
-        activities: {
-          orderBy: { createdAt: 'desc' },
-          take: 20,
-        },
-        sourceRecords: {
-          orderBy: { importedAt: 'desc' },
-        },
-      },
+    const lead = await getLeadWithRelations(id, {
+      company: true,
+      leadTags: true,
+      enrichmentJobs: { limit: 10 },
+      aiAnalyses: { limit: 5 },
+      emailMessages: { limit: 10 },
+      campaignLeads: true,
+      activities: { limit: 20 },
+      sourceRecords: true,
     });
 
     if (!lead || lead.deletedAt) {
@@ -87,7 +68,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const existing = await prisma.lead.findUnique({ where: { id } });
+    const existing = await db.leads.findById(id);
     if (!existing || existing.deletedAt) {
       return NextResponse.json(
         { success: false, error: 'Lead not found' },
@@ -96,44 +77,32 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     }
 
     const { tags, customFields, ...updateData } = parsed.data;
-    const prismaData: Record<string, unknown> = { ...updateData };
+    const updateFields: Record<string, unknown> = { ...updateData };
     if (customFields !== undefined) {
-      prismaData.customFields = customFields as object;
+      updateFields.customFields = customFields;
     }
 
     // Recompute fullName if first/last name changed
-    if (prismaData.firstName !== undefined || prismaData.lastName !== undefined) {
-      const firstName = (prismaData.firstName as string) ?? existing.firstName;
-      const lastName = (prismaData.lastName as string) ?? existing.lastName;
-      if (!prismaData.fullName) {
-        prismaData.fullName = [firstName, lastName].filter(Boolean).join(' ') || undefined;
+    if (updateFields.firstName !== undefined || updateFields.lastName !== undefined) {
+      const firstName = (updateFields.firstName as string) ?? existing.firstName;
+      const lastName = (updateFields.lastName as string) ?? existing.lastName;
+      if (!updateFields.fullName) {
+        updateFields.fullName = [firstName, lastName].filter(Boolean).join(' ') || undefined;
       }
     }
 
-    if (prismaData.email) {
-      prismaData.email = (prismaData.email as string).toLowerCase().trim();
+    if (updateFields.email) {
+      updateFields.email = (updateFields.email as string).toLowerCase().trim();
     }
 
-    const lead = await prisma.lead.update({
-      where: { id },
-      data: prismaData,
-    });
+    const lead = await db.leads.update(id, updateFields);
 
     // Update tags if provided
     if (tags !== undefined) {
-      // Remove existing tags
-      await prisma.leadTag.deleteMany({ where: { leadId: id } });
-
-      // Add new tags
+      await db.leadTags.deleteMany({ leadId: id });
       for (const tagName of tags) {
-        const tag = await prisma.tag.upsert({
-          where: { name: tagName },
-          update: {},
-          create: { name: tagName },
-        });
-        await prisma.leadTag.create({
-          data: { leadId: id, tagId: tag.id },
-        }).catch(() => {});
+        const tag = await db.tags.upsert('name', tagName, {}, { name: tagName });
+        await db.leadTags.create({ leadId: id, tagId: tag.id }).catch(() => {});
       }
     }
 
@@ -144,10 +113,15 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       metadata: { updatedFields: Object.keys(parsed.data) },
     });
 
-    const fullLead = await prisma.lead.findUnique({
-      where: { id },
-      include: { leadTags: { include: { tag: true } } },
-    });
+    // Load tags
+    const tagDocs = await db.leadTags.findMany({ where: { leadId: id } });
+    const leadTags = await Promise.all(
+      tagDocs.map(async (lt) => {
+        const tag = await db.tags.findById(lt.tagId as string);
+        return { ...lt, tag };
+      })
+    );
+    const fullLead = { ...lead, leadTags };
 
     return NextResponse.json({ success: true, data: fullLead });
   } catch (error) {
@@ -171,7 +145,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     const { id } = await context.params;
 
-    const existing = await prisma.lead.findUnique({ where: { id } });
+    const existing = await db.leads.findById(id);
     if (!existing || existing.deletedAt) {
       return NextResponse.json(
         { success: false, error: 'Lead not found' },
@@ -180,10 +154,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     }
 
     // Soft delete
-    await prisma.lead.update({
-      where: { id },
-      data: { deletedAt: new Date() },
-    });
+    await db.leads.update(id, { deletedAt: new Date() });
 
     await createActivity({
       eventType: 'lead.deleted',

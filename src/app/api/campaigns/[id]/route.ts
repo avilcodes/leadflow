@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/db';
+import db, { getCampaignWithRelations } from '@/lib/db';
 import { authenticateRequest } from '@/lib/auth';
 import { updateCampaignSchema } from '@/lib/validation';
 import logger from '@/lib/logger';
@@ -15,20 +15,10 @@ export async function GET(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({
-      where: { id },
-      include: {
-        campaignLeads: {
-          include: {
-            lead: { select: { id: true, fullName: true, email: true, companyName: true, jobTitle: true, outreachStatus: true } },
-          },
-        },
-        emailMessages: {
-          orderBy: { createdAt: 'desc' },
-          include: { lead: { select: { id: true, fullName: true, email: true } } },
-        },
-        createdBy: { select: { id: true, name: true, email: true } },
-      },
+    const campaign = await getCampaignWithRelations(id, {
+      campaignLeads: { includeLeads: true },
+      emailMessages: { includeLeads: true },
+      createdBy: true,
     });
 
     if (!campaign) {
@@ -59,10 +49,7 @@ export async function PUT(
       return NextResponse.json({ success: false, error: parsed.error.errors[0].message }, { status: 400 });
     }
 
-    const campaign = await prisma.campaign.update({
-      where: { id },
-      data: parsed.data,
-    });
+    const campaign = await db.campaigns.update(id, parsed.data);
 
     return NextResponse.json({ success: true, data: campaign });
   } catch (error) {
@@ -82,7 +69,7 @@ export async function DELETE(
     }
 
     const { id } = await params;
-    const campaign = await prisma.campaign.findUnique({ where: { id } });
+    const campaign = await db.campaigns.findById(id);
     if (!campaign) {
       return NextResponse.json({ success: false, error: 'Campaign not found' }, { status: 404 });
     }
@@ -90,7 +77,7 @@ export async function DELETE(
       return NextResponse.json({ success: false, error: 'Cannot delete a running campaign' }, { status: 400 });
     }
 
-    await prisma.campaign.delete({ where: { id } });
+    await db.campaigns.delete(id);
     return NextResponse.json({ success: true, message: 'Campaign deleted' });
   } catch (error) {
     logger.error('DELETE /api/campaigns/[id] failed', { error });

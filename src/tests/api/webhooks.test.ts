@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mockPrismaClient } from '../setup';
+import { mockDb } from '../setup';
 
-// ─── Webhook Processing Logic (matching app behavior) ───
+// ─── Webhook Processing Logic (matching app behavior with Firestore) ───
 
 interface BrevoWebhookEvent {
   event: string;
@@ -36,7 +36,7 @@ const EVENT_MAP: EmailStatusMap = {
   },
   click: {
     emailField: 'clickedAt',
-    outreachStatus: 'opened', // keep as opened, click is a sub-event
+    outreachStatus: 'opened',
     activityType: 'email.clicked',
   },
   hard_bounce: {
@@ -56,21 +56,28 @@ const EVENT_MAP: EmailStatusMap = {
   },
 };
 
+interface MockDbType {
+  webhookEvents: typeof mockDb.webhookEvents;
+  emailMessages: typeof mockDb.emailMessages;
+  leads: typeof mockDb.leads;
+  activities: typeof mockDb.activities;
+}
+
 async function processBrevoWebhook(
   event: BrevoWebhookEvent,
-  prisma: typeof mockPrismaClient
+  db: MockDbType
 ): Promise<{ processed: boolean; reason?: string }> {
   const eventMapping = EVENT_MAP[event.event];
   if (!eventMapping) {
     return { processed: false, reason: `Unknown event type: ${event.event}` };
   }
 
+  const providerEventId = `${event['message-id']}-${event.event}-${event.ts_event}`;
+
   // Idempotency check
-  const existingEvent = await prisma.webhookEvent.findFirst({
-    where: {
-      provider: 'brevo',
-      providerEventId: `${event['message-id']}-${event.event}-${event.ts_event}`,
-    },
+  const existingEvent = await db.webhookEvents.findFirst({
+    provider: 'brevo',
+    providerEventId,
   });
 
   if (existingEvent) {
@@ -78,25 +85,23 @@ async function processBrevoWebhook(
   }
 
   // Store webhook event
-  const webhookRecord = await prisma.webhookEvent.create({
-    data: {
-      provider: 'brevo',
-      eventType: event.event,
-      providerEventId: `${event['message-id']}-${event.event}-${event.ts_event}`,
-      payload: event as unknown as Record<string, unknown>,
-      status: 'processing',
-    },
+  const webhookRecord = await db.webhookEvents.create({
+    provider: 'brevo',
+    eventType: event.event,
+    providerEventId,
+    payload: event as unknown as Record<string, unknown>,
+    status: 'processing',
   });
 
   // Find email message
-  const emailMessage = await prisma.emailMessage.findFirst({
-    where: { providerMessageId: event['message-id'] },
+  const emailMessage = await db.emailMessages.findFirst({
+    providerMessageId: event['message-id'],
   });
 
   if (!emailMessage) {
-    await prisma.webhookEvent.update({
-      where: { id: webhookRecord.id },
-      data: { status: 'failed', errorMessage: 'Email message not found' },
+    await db.webhookEvents.update(webhookRecord.id, {
+      status: 'failed',
+      errorMessage: 'Email message not found',
     });
     return { processed: false, reason: 'Email message not found' };
   }
@@ -106,46 +111,39 @@ async function processBrevoWebhook(
     [eventMapping.emailField]: new Date(event.date),
   };
 
-  // Update status only if it's a progression
   if (event.event === 'delivered') {
     updateData.status = 'delivered';
   }
 
-  await prisma.emailMessage.update({
-    where: { id: emailMessage.id },
-    data: updateData,
-  });
+  await db.emailMessages.update(emailMessage.id, updateData);
 
   // Update lead outreach status
   if (emailMessage.leadId) {
-    await prisma.lead.update({
-      where: { id: emailMessage.leadId },
-      data: { outreachStatus: eventMapping.outreachStatus },
+    await db.leads.update(emailMessage.leadId as string, {
+      outreachStatus: eventMapping.outreachStatus,
     });
   }
 
   // Create activity
-  await prisma.activity.create({
-    data: {
-      eventType: eventMapping.activityType,
-      leadId: emailMessage.leadId,
-      campaignId: emailMessage.campaignId,
-      emailMessageId: emailMessage.id,
-      provider: 'brevo',
-      providerEventId: `${event['message-id']}-${event.event}-${event.ts_event}`,
-      metadata: {
-        email: event.email,
-        event: event.event,
-        reason: event.reason,
-        link: event.link,
-      },
+  await db.activities.create({
+    eventType: eventMapping.activityType,
+    leadId: emailMessage.leadId,
+    campaignId: emailMessage.campaignId,
+    emailMessageId: emailMessage.id,
+    provider: 'brevo',
+    providerEventId,
+    metadata: {
+      email: event.email,
+      event: event.event,
+      reason: event.reason,
+      link: event.link,
     },
   });
 
   // Mark webhook as processed
-  await prisma.webhookEvent.update({
-    where: { id: webhookRecord.id },
-    data: { status: 'processed', processedAt: new Date() },
+  await db.webhookEvents.update(webhookRecord.id, {
+    status: 'processed',
+    processedAt: new Date(),
   });
 
   return { processed: true };
@@ -176,27 +174,22 @@ describe('Webhook Processing', () => {
     };
 
     it('processes delivered event and updates email message', async () => {
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({
-        id: 'wh-1',
-        status: 'processing',
-      });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue(mockEmailMessage);
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({ id: 'act-1' });
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-1', status: 'processing' });
+      mockDb.emailMessages.findFirst.mockResolvedValue(mockEmailMessage);
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({ id: 'act-1' });
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      const result = await processBrevoWebhook(baseEvent, mockPrismaClient);
+      const result = await processBrevoWebhook(baseEvent, mockDb);
 
       expect(result.processed).toBe(true);
-      expect(mockPrismaClient.emailMessage.update).toHaveBeenCalledWith(
+      expect(mockDb.emailMessages.update).toHaveBeenCalledWith(
+        'email-1',
         expect.objectContaining({
-          where: { id: 'email-1' },
-          data: expect.objectContaining({
-            deliveredAt: expect.any(Date),
-            status: 'delivered',
-          }),
+          deliveredAt: expect.any(Date),
+          status: 'delivered',
         })
       );
     });
@@ -204,20 +197,19 @@ describe('Webhook Processing', () => {
     it('processes opened event', async () => {
       const openedEvent = { ...baseEvent, event: 'opened', ts_event: 1705312300 };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-2' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue(mockEmailMessage);
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-2' });
+      mockDb.emailMessages.findFirst.mockResolvedValue(mockEmailMessage);
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({});
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      const result = await processBrevoWebhook(openedEvent, mockPrismaClient);
+      const result = await processBrevoWebhook(openedEvent, mockDb);
       expect(result.processed).toBe(true);
 
-      expect(mockPrismaClient.lead.update).toHaveBeenCalledWith({
-        where: { id: 'lead-1' },
-        data: { outreachStatus: 'opened' },
+      expect(mockDb.leads.update).toHaveBeenCalledWith('lead-1', {
+        outreachStatus: 'opened',
       });
     });
 
@@ -229,25 +221,25 @@ describe('Webhook Processing', () => {
         link: 'https://example.com/landing',
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-3' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue(mockEmailMessage);
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-3' });
+      mockDb.emailMessages.findFirst.mockResolvedValue(mockEmailMessage);
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({});
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      const result = await processBrevoWebhook(clickEvent, mockPrismaClient);
+      const result = await processBrevoWebhook(clickEvent, mockDb);
       expect(result.processed).toBe(true);
 
-      expect(mockPrismaClient.activity.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
+      expect(mockDb.activities.create).toHaveBeenCalledWith(
+        expect.objectContaining({
           eventType: 'email.clicked',
           metadata: expect.objectContaining({
             link: 'https://example.com/landing',
           }),
-        }),
-      });
+        })
+      );
     });
 
     it('processes hard_bounce event', async () => {
@@ -258,27 +250,26 @@ describe('Webhook Processing', () => {
         reason: 'Mailbox does not exist',
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-4' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue(mockEmailMessage);
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-4' });
+      mockDb.emailMessages.findFirst.mockResolvedValue(mockEmailMessage);
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({});
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      const result = await processBrevoWebhook(bounceEvent, mockPrismaClient);
+      const result = await processBrevoWebhook(bounceEvent, mockDb);
       expect(result.processed).toBe(true);
 
-      expect(mockPrismaClient.lead.update).toHaveBeenCalledWith({
-        where: { id: 'lead-1' },
-        data: { outreachStatus: 'bounced' },
+      expect(mockDb.leads.update).toHaveBeenCalledWith('lead-1', {
+        outreachStatus: 'bounced',
       });
     });
 
     it('returns unknown for unmapped event types', async () => {
       const unknownEvent = { ...baseEvent, event: 'complaint' };
 
-      const result = await processBrevoWebhook(unknownEvent, mockPrismaClient);
+      const result = await processBrevoWebhook(unknownEvent, mockDb);
       expect(result.processed).toBe(false);
       expect(result.reason).toContain('Unknown event type');
     });
@@ -294,18 +285,18 @@ describe('Webhook Processing', () => {
         ts_event: 1705312200,
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue({
+      mockDb.webhookEvents.findFirst.mockResolvedValue({
         id: 'wh-existing',
         provider: 'brevo',
         providerEventId: '<msg-123@brevo.com>-delivered-1705312200',
       });
 
-      const result = await processBrevoWebhook(event, mockPrismaClient);
+      const result = await processBrevoWebhook(event, mockDb);
 
       expect(result.processed).toBe(false);
       expect(result.reason).toBe('Duplicate event');
-      expect(mockPrismaClient.webhookEvent.create).not.toHaveBeenCalled();
-      expect(mockPrismaClient.emailMessage.update).not.toHaveBeenCalled();
+      expect(mockDb.webhookEvents.create).not.toHaveBeenCalled();
+      expect(mockDb.emailMessages.update).not.toHaveBeenCalled();
     });
 
     it('processes same message-id with different event types', async () => {
@@ -325,38 +316,36 @@ describe('Webhook Processing', () => {
         ts_event: 1705312500,
       };
 
-      // First event - no duplicate
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValueOnce(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValueOnce({ id: 'wh-1' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValueOnce({
+      mockDb.webhookEvents.findFirst.mockResolvedValueOnce(null);
+      mockDb.webhookEvents.create.mockResolvedValueOnce({ id: 'wh-1' });
+      mockDb.emailMessages.findFirst.mockResolvedValueOnce({
         id: 'email-1',
         leadId: 'lead-1',
         campaignId: 'campaign-1',
         providerMessageId: '<msg-123@brevo.com>',
       });
-      mockPrismaClient.emailMessage.update.mockResolvedValueOnce({});
-      mockPrismaClient.lead.update.mockResolvedValueOnce({});
-      mockPrismaClient.activity.create.mockResolvedValueOnce({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValueOnce({});
+      mockDb.emailMessages.update.mockResolvedValueOnce({});
+      mockDb.leads.update.mockResolvedValueOnce({});
+      mockDb.activities.create.mockResolvedValueOnce({});
+      mockDb.webhookEvents.update.mockResolvedValueOnce({});
 
-      const result1 = await processBrevoWebhook(deliveredEvent, mockPrismaClient);
+      const result1 = await processBrevoWebhook(deliveredEvent, mockDb);
       expect(result1.processed).toBe(true);
 
-      // Second event - different type, no duplicate
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValueOnce(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValueOnce({ id: 'wh-2' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValueOnce({
+      mockDb.webhookEvents.findFirst.mockResolvedValueOnce(null);
+      mockDb.webhookEvents.create.mockResolvedValueOnce({ id: 'wh-2' });
+      mockDb.emailMessages.findFirst.mockResolvedValueOnce({
         id: 'email-1',
         leadId: 'lead-1',
         campaignId: 'campaign-1',
         providerMessageId: '<msg-123@brevo.com>',
       });
-      mockPrismaClient.emailMessage.update.mockResolvedValueOnce({});
-      mockPrismaClient.lead.update.mockResolvedValueOnce({});
-      mockPrismaClient.activity.create.mockResolvedValueOnce({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValueOnce({});
+      mockDb.emailMessages.update.mockResolvedValueOnce({});
+      mockDb.leads.update.mockResolvedValueOnce({});
+      mockDb.activities.create.mockResolvedValueOnce({});
+      mockDb.webhookEvents.update.mockResolvedValueOnce({});
 
-      const result2 = await processBrevoWebhook(openedEvent, mockPrismaClient);
+      const result2 = await processBrevoWebhook(openedEvent, mockDb);
       expect(result2.processed).toBe(true);
     });
   });
@@ -371,18 +360,18 @@ describe('Webhook Processing', () => {
         ts_event: 1705312200,
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-5' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-5' });
+      mockDb.emailMessages.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      const result = await processBrevoWebhook(event, mockPrismaClient);
+      const result = await processBrevoWebhook(event, mockDb);
 
       expect(result.processed).toBe(false);
       expect(result.reason).toBe('Email message not found');
-      expect(mockPrismaClient.webhookEvent.update).toHaveBeenCalledWith({
-        where: { id: 'wh-5' },
-        data: { status: 'failed', errorMessage: 'Email message not found' },
+      expect(mockDb.webhookEvents.update).toHaveBeenCalledWith('wh-5', {
+        status: 'failed',
+        errorMessage: 'Email message not found',
       });
     });
 
@@ -395,24 +384,23 @@ describe('Webhook Processing', () => {
         ts_event: 1705312200,
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-6' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue({
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-6' });
+      mockDb.emailMessages.findFirst.mockResolvedValue({
         id: 'email-2',
         leadId: 'lead-2',
         campaignId: 'campaign-1',
         providerMessageId: '<msg-456@brevo.com>',
       });
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({});
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({});
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      await processBrevoWebhook(event, mockPrismaClient);
+      await processBrevoWebhook(event, mockDb);
 
-      expect(mockPrismaClient.lead.update).toHaveBeenCalledWith({
-        where: { id: 'lead-2' },
-        data: { outreachStatus: 'delivered' },
+      expect(mockDb.leads.update).toHaveBeenCalledWith('lead-2', {
+        outreachStatus: 'delivered',
       });
     });
   });
@@ -427,31 +415,31 @@ describe('Webhook Processing', () => {
         ts_event: 1705314000,
       };
 
-      mockPrismaClient.webhookEvent.findFirst.mockResolvedValue(null);
-      mockPrismaClient.webhookEvent.create.mockResolvedValue({ id: 'wh-7' });
-      mockPrismaClient.emailMessage.findFirst.mockResolvedValue({
+      mockDb.webhookEvents.findFirst.mockResolvedValue(null);
+      mockDb.webhookEvents.create.mockResolvedValue({ id: 'wh-7' });
+      mockDb.emailMessages.findFirst.mockResolvedValue({
         id: 'email-3',
         leadId: 'lead-3',
         campaignId: 'campaign-2',
         providerMessageId: '<msg-789@brevo.com>',
       });
-      mockPrismaClient.emailMessage.update.mockResolvedValue({});
-      mockPrismaClient.lead.update.mockResolvedValue({});
-      mockPrismaClient.activity.create.mockResolvedValue({ id: 'act-1' });
-      mockPrismaClient.webhookEvent.update.mockResolvedValue({});
+      mockDb.emailMessages.update.mockResolvedValue({});
+      mockDb.leads.update.mockResolvedValue({});
+      mockDb.activities.create.mockResolvedValue({ id: 'act-1' });
+      mockDb.webhookEvents.update.mockResolvedValue({});
 
-      await processBrevoWebhook(event, mockPrismaClient);
+      await processBrevoWebhook(event, mockDb);
 
-      expect(mockPrismaClient.activity.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
+      expect(mockDb.activities.create).toHaveBeenCalledWith(
+        expect.objectContaining({
           eventType: 'email.opened',
           leadId: 'lead-3',
           campaignId: 'campaign-2',
           emailMessageId: 'email-3',
           provider: 'brevo',
           providerEventId: '<msg-789@brevo.com>-opened-1705314000',
-        }),
-      });
+        })
+      );
     });
   });
 });
