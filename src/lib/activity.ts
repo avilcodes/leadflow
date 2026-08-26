@@ -42,8 +42,8 @@ export async function createActivity(params: CreateActivityParams) {
         userId: params.userId,
         provider: params.provider,
         providerEventId: params.providerEventId,
-        metadata: params.metadata ?? undefined,
-        errorInfo: params.errorInfo ?? undefined,
+        metadata: params.metadata ? (params.metadata as object) : undefined,
+        errorInfo: params.errorInfo ? (params.errorInfo as object) : undefined,
       },
     });
 
