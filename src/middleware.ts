@@ -6,7 +6,7 @@ const JWT_SECRET = new TextEncoder().encode(
   process.env.AUTH_SECRET || 'dev-secret-change-in-production-32chars'
 );
 
-const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register', '/api/webhooks'];
+const PUBLIC_PATHS = ['/login', '/register', '/api/auth/login', '/api/auth/register', '/api/webhooks', '/api/health'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

@@ -40,6 +40,7 @@ export async function POST(request: NextRequest) {
       name,
       passwordHash,
       role,
+      isActive: true,
       lastLoginAt: new Date(),
     });
 
