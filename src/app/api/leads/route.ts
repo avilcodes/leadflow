@@ -60,9 +60,8 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     logger.error('GET /api/leads failed', { error });
-    const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { success: false, error: 'Internal server error', debug: message },
+      { success: false, error: 'Internal server error' },
       { status: 500 }
     );
   }

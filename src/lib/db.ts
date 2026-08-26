@@ -315,19 +315,18 @@ export async function searchLeads(
 
   let q: Query = firestore.collection(COLLECTIONS.LEADS);
 
-  // Apply equality filters (Firestore can handle these natively)
-  q = q.where('deletedAt', '==', null);
-  if (status) q = q.where('status', '==', status);
-  if (enrichmentStatus) q = q.where('enrichmentStatus', '==', enrichmentStatus);
-  if (outreachStatus) q = q.where('outreachStatus', '==', outreachStatus);
-  if (source) q = q.where('source', '==', source);
-
-  // Order
-  q = q.orderBy(sortBy, sortOrder);
-
-  // Get all matching docs (we'll filter in-memory for text search and paginate)
+  // Fetch all leads and filter in-memory to avoid composite index requirements
   const snap = await q.get();
   let results = snap.docs.map((d) => docToObject(d)!);
+
+  // Filter out soft-deleted leads
+  results = results.filter(r => r.deletedAt == null);
+
+  // Apply equality filters in-memory
+  if (status) results = results.filter(r => r.status === status);
+  if (enrichmentStatus) results = results.filter(r => r.enrichmentStatus === enrichmentStatus);
+  if (outreachStatus) results = results.filter(r => r.outreachStatus === outreachStatus);
+  if (source) results = results.filter(r => r.source === source);
 
   // In-memory text search (case-insensitive)
   if (search) {
@@ -363,6 +362,24 @@ export async function searchLeads(
       return options.tags!.some(t => leadTags.includes(t));
     });
   }
+
+  // Sort in-memory to avoid composite index requirements
+  results.sort((a, b) => {
+    const aVal = a[sortBy];
+    const bVal = b[sortBy];
+    if (aVal == null && bVal == null) return 0;
+    if (aVal == null) return 1;
+    if (bVal == null) return -1;
+    const aTime = aVal instanceof Date ? aVal.getTime() :
+      (aVal && typeof aVal === 'object' && 'toDate' in aVal) ? (aVal as { toDate: () => Date }).toDate().getTime() :
+      typeof aVal === 'string' ? aVal : 0;
+    const bTime = bVal instanceof Date ? bVal.getTime() :
+      (bVal && typeof bVal === 'object' && 'toDate' in bVal) ? (bVal as { toDate: () => Date }).toDate().getTime() :
+      typeof bVal === 'string' ? bVal : 0;
+    if (aTime < bTime) return sortOrder === 'asc' ? -1 : 1;
+    if (aTime > bTime) return sortOrder === 'asc' ? 1 : -1;
+    return 0;
+  });
 
   const total = results.length;
 
