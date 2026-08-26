@@ -65,8 +65,9 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     logger.error('Registration failed', { error });
+    const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { success: false, error: 'Internal server error' },
+      { success: false, error: 'Internal server error', debug: message },
       { status: 500 }
     );
   }
