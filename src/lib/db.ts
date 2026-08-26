@@ -313,10 +313,8 @@ export async function searchLeads(
     page = 1, pageSize = 25,
   } = options;
 
-  let q: Query = firestore.collection(COLLECTIONS.LEADS);
-
   // Fetch all leads and filter in-memory to avoid composite index requirements
-  const snap = await q.get();
+  const snap = await firestore.collection(COLLECTIONS.LEADS).get();
   let results = snap.docs.map((d) => docToObject(d)!);
 
   // Filter out soft-deleted leads
